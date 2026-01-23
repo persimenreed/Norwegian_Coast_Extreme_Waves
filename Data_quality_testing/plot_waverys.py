@@ -109,7 +109,7 @@ if __name__ == "__main__":
     start_date = parse_yymm(args.start, True) if args.start else None
     end_date = parse_yymm(args.end, False) if args.end else None
     
-    csv_file = "data/waverys/cmems_mod_glo_wav_my_0.2deg_PT3H-i_1768390036755.csv"
+    csv_file = "data/csv_raw_data/waverys/cmems_mod_glo_wav_my_0.2deg_PT3H-i_1768390036755.csv"
     latitude = 60.4
     longitude = 4.399994
     

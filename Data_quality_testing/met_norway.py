@@ -36,8 +36,8 @@ def extract_nc_to_csv(raw_data_folder, output_folder):
             print(f"Error processing {filename}: {e}")
 
 if __name__ == "__main__":
-    raw_data_folder = f"raw_data/MET_norway/{location}"
-    output_folder = f"data/met_norway/{location}"
+    raw_data_folder = f"data/raw_data/met_norway/{location}"
+    output_folder = f"data/csv_raw_data/met_norway/{location}"
     
     extract_nc_to_csv(raw_data_folder, output_folder)
     print("\nExtraction complete!")

@@ -105,10 +105,10 @@ if __name__ == "__main__":
     start_date = parse_yymm(args.start, True) if args.start else None
     end_date = parse_yymm(args.end, False) if args.end else None
 
-    csv_files = sorted(glob.glob(f"data/met_norway/{args.location}/*.csv"))
+    csv_files = sorted(glob.glob(f"data/csv_raw_data/met_norway/{args.location}/*.csv"))
 
     if not csv_files:
-        print(f"No CSV files found in data/met_norway/{args.location}/")
+        print(f"No CSV files found in data/csv_raw_data/met_norway/{args.location}/")
     else:
         print(f"Found {len(csv_files)} CSV files")
         plot_significant_wave_height_combined(csv_files, start_date, end_date)

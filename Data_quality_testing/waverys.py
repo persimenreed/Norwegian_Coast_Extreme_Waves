@@ -26,8 +26,8 @@ def extract_nc_to_csv(nc_file, output_folder):
 if __name__ == "__main__":
     import os
     
-    nc_file = "raw_data/waverys/cmems_mod_glo_wav_my_0.2deg_PT3H-i_1768390036755.nc"
-    output_folder = "data/waverys"
+    nc_file = "data/raw_data/waverys/cmems_mod_glo_wav_my_0.2deg_PT3H-i_1768390036755.nc"
+    output_folder = "data/csv_raw_data/waverys"
     
     extract_nc_to_csv(nc_file, output_folder)
     print("\nExtraction complete!")
