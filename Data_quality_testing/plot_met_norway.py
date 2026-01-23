@@ -35,7 +35,7 @@ def plot_significant_wave_height_combined(csv_files, start_date=None, end_date=N
     if end_date is not None:
         df_combined = df_combined[df_combined['time'] <= end_date]
 
-    # === Plot: two subplots ===
+    # Two subplots
     fig, (ax_hs, ax_tp) = plt.subplots(
         nrows=2,
         ncols=1,
@@ -43,7 +43,7 @@ def plot_significant_wave_height_combined(csv_files, start_date=None, end_date=N
         sharex=True
     )
 
-    # --- Hs ---
+    # Hs
     ax_hs.plot(
         df_combined['time'],
         df_combined['Significant_Wave_Height_Hm0'],
@@ -59,7 +59,7 @@ def plot_significant_wave_height_combined(csv_files, start_date=None, end_date=N
     ax_hs.grid(True, alpha=0.3)
     ax_hs.legend()
 
-    # --- Tp ---
+    # Tp
     ax_tp.plot(
         df_combined['time'],
         df_combined['Wave_Peak_Period'],
@@ -75,41 +75,18 @@ def plot_significant_wave_height_combined(csv_files, start_date=None, end_date=N
     fig.autofmt_xdate(rotation=45, ha='right')
     fig.tight_layout()
 
-    output_file = f"output/{args.location}_combined_wave_height_tp.png"
+    output_file = f"Data_quality_testing/output/{args.location}_combined_wave_height_tp.png"
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     print(f"Plot saved to {output_file}")
 
-    # === Statistics ===
-
-    # Hs statistics
-    hs = df_combined['Significant_Wave_Height_Hm0']
-    n_total = len(hs)
-    n_missing_hs = hs.isna().sum()
-
-    print("\nSignificant Wave Height (Hs) Statistics (Filtered):")
-    print(f"  Mean: {hs.mean():.2f} m")
-    print(f"  Min: {hs.min():.2f} m")
-    print(f"  Max: {hs.max():.2f} m")
-    print(f"  Std Dev: {hs.std():.2f} m")
-    print(f"  Missing values: {n_missing_hs} / {n_total} ({100*n_missing_hs/n_total:.2f}%)")
-
-    # Tp statistics
-    tp = df_combined['Wave_Peak_Period']
-    n_missing_tp = tp.isna().sum()
-
-    print("\nWave Spectral Peak Period (Tp) Statistics (Filtered):")
-    print(f"  Mean: {tp.mean():.2f} s")
-    print(f"  Min: {tp.min():.2f} s")
-    print(f"  Max: {tp.max():.2f} s")
-    print(f"  Std Dev: {tp.std():.2f} s")
-    print(f"  Missing values: {n_missing_tp} / {len(tp)} ({100*n_missing_tp/len(tp):.2f}%)")
-
-    # Wave direction – missing values only
-    direction = df_combined['Wave_Peak_Direction']
-    n_missing_dir = direction.isna().sum()
-
-    print("\nWave Direction (Peak) Missing Data:")
-    print(f"  Missing values: {n_missing_dir} / {len(direction)} ({100*n_missing_dir/len(direction):.2f}%)")
+    # Missing values summary
+    n_total = len(df_combined)
+    print("\nMissing values per column:")
+    for col in df_combined.columns:
+        missing = df_combined[col].isna().sum()
+        available = n_total - missing
+        pct = 100 * missing / n_total if n_total else 0
+        print(f"{col},{available},({pct:.2f}% missing)")
 
     print(f"\nTime range: {df_combined['time'].min()} to {df_combined['time'].max()}")
 
@@ -128,10 +105,10 @@ if __name__ == "__main__":
     start_date = parse_yymm(args.start, True) if args.start else None
     end_date = parse_yymm(args.end, False) if args.end else None
 
-    csv_files = sorted(glob.glob(f"../data/met_norway/{args.location}/*.csv"))
+    csv_files = sorted(glob.glob(f"data/met_norway/{args.location}/*.csv"))
 
     if not csv_files:
-        print(f"No CSV files found in ../data/met_norway/{args.location}/")
+        print(f"No CSV files found in data/met_norway/{args.location}/")
     else:
         print(f"Found {len(csv_files)} CSV files")
         plot_significant_wave_height_combined(csv_files, start_date, end_date)
