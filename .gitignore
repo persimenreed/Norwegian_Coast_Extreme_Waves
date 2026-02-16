@@ -43,3 +43,16 @@ __pycache__/
 # data
 data/*
 raw_data/*
+
+DATA_EXTRACTION/nora3_locations
+DATA_EXTRACTION/nora3_partitioned
+DATA_EXTRACTION/wam800_locations
+DATA_EXTRACTION/wam800_partitioned
+
+# misc
+NORA3_extraction
+WAFO
+WW3_extraction
+cache
+Forecast
+Bias_correcting
