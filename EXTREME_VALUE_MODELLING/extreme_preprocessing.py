@@ -1,20 +1,34 @@
 """
 EXTREME_VALUE_MODELLING/extreme_preprocessing.py
 
-Prepares:
-- Annual maxima (GEV-ready)
-- POT storm peaks (GPD-ready)
+Best-practice preprocessing for EVT:
+- Annual maxima
+- POT with 48h declustering
+- Fractional-year event rate
 """
 
-import pandas as pd
+import os
 import numpy as np
+import pandas as pd
 
 
 # ==============================
 # CONFIG
 # ==============================
 
-INPUT_PATH = "data/csv_raw_data/NORA3/NORA3_fauskane2_wind_wave_lon5.72659_lat62.5671_20200520_20210303.csv"
+LOCATION = "fedjeosen"
+MODE = "corrected"        # "raw" or "corrected"
+CORR_METHOD = "qm"
+
+if MODE == "raw":
+    INPUT_PATH = f"DATA_EXTRACTION/nora3_locations/NORA3_wind_wave_{LOCATION}_1969_2025.csv"
+elif MODE == "corrected":
+    INPUT_PATH = f"BIAS_CORRECTION/output/{LOCATION}/hindcast_corrected_{CORR_METHOD}.csv"
+else:
+    raise ValueError("MODE must be 'raw' or 'corrected'")
+
+OUTPUT_DIR = f"EXTREME_VALUE_MODELLING/output/{LOCATION}/{MODE}"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 HS_COLUMN = "hs"
 TIME_COLUMN = "time"
@@ -28,11 +42,20 @@ DECLUSTER_HOURS = 48
 # ==============================
 
 def load_data(path):
+
     df = pd.read_csv(path, comment="#")
-    df[TIME_COLUMN] = pd.to_datetime(df[TIME_COLUMN])
+
+    if TIME_COLUMN not in df.columns or HS_COLUMN not in df.columns:
+        raise ValueError("Missing required columns")
+
+    df[TIME_COLUMN] = pd.to_datetime(df[TIME_COLUMN], errors="coerce")
+    df[HS_COLUMN] = pd.to_numeric(df[HS_COLUMN], errors="coerce")
+
+    df = df.dropna(subset=[TIME_COLUMN, HS_COLUMN])
+    df = df[df[HS_COLUMN] > 0]
     df = df.sort_values(TIME_COLUMN)
-    df = df[[TIME_COLUMN, HS_COLUMN]].dropna()
     df = df.set_index(TIME_COLUMN)
+
     return df
 
 
@@ -41,51 +64,78 @@ def load_data(path):
 # ==============================
 
 def compute_annual_maxima(df):
-    return df[HS_COLUMN].resample("Y").max().dropna()
+
+    # Compute annual maxima (calendar year)
+    annual_max = df[HS_COLUMN].resample("YE").max().dropna()
+
+    if len(annual_max) < 3:
+        raise ValueError("Not enough annual maxima.")
+
+    # Identify full calendar years
+    first_year = df.index.min().year
+    last_year = df.index.max().year
+
+    # Keep only fully observed years
+    annual_max = annual_max[
+        (annual_max.index.year > first_year) &
+        (annual_max.index.year < last_year)
+    ]
+
+    if len(annual_max) < 3:
+        raise ValueError("Too few full calendar years after removing partial years.")
+
+    return annual_max
 
 
 # ==============================
-# POT + DECLUSTERING
+# DECLUSTERING (Cluster-max)
 # ==============================
 
-def decluster(times, values, window_hours):
+def decluster_clustermax(exceed_df, window_hours):
+
+    if exceed_df.empty:
+        return pd.Series(dtype=float)
+
     peaks = []
-    last_time = None
+    cluster = [exceed_df.iloc[0]]
 
-    for t, v in zip(times, values):
-        if last_time is None:
-            peaks.append((t, v))
-            last_time = t
+    for i in range(1, len(exceed_df)):
+        dt = (exceed_df.index[i] - exceed_df.index[i-1]).total_seconds() / 3600
+
+        if dt <= window_hours:
+            cluster.append(exceed_df.iloc[i])
         else:
-            delta = (t - last_time).total_seconds() / 3600
-            if delta >= window_hours:
-                peaks.append((t, v))
-                last_time = t
-            else:
-                if v > peaks[-1][1]:
-                    peaks[-1] = (t, v)
-                    last_time = t
+            cluster_df = pd.DataFrame(cluster)
+            peaks.append(cluster_df[HS_COLUMN].max())
+            cluster = [exceed_df.iloc[i]]
 
-    return pd.Series(
-        [p[1] for p in peaks],
-        index=[p[0] for p in peaks]
-    )
+    # last cluster
+    cluster_df = pd.DataFrame(cluster)
+    peaks.append(cluster_df[HS_COLUMN].max())
 
+    return pd.Series(peaks)
+
+
+# ==============================
+# POT
+# ==============================
 
 def compute_pot(df, quantile, decluster_hours):
+
     threshold = df[HS_COLUMN].quantile(quantile)
+
     exceed = df[df[HS_COLUMN] > threshold]
 
     if exceed.empty:
         raise ValueError("No exceedances found.")
 
-    peaks = decluster(
-        exceed.index,
-        exceed[HS_COLUMN].values,
-        decluster_hours
-    )
+    peaks = decluster_clustermax(exceed, decluster_hours)
 
-    return peaks, threshold
+    # Fractional-year calculation
+    total_years = (df.index[-1] - df.index[0]).days / 365.25
+    lambda_year = len(peaks) / total_years
+
+    return peaks, threshold, lambda_year, total_years
 
 
 # ==============================
@@ -94,23 +144,35 @@ def compute_pot(df, quantile, decluster_hours):
 
 if __name__ == "__main__":
 
+    print(f"\nRunning preprocessing in {MODE.upper()} mode")
+    print(f"Input: {INPUT_PATH}")
+
     df = load_data(INPUT_PATH)
 
+    # Annual maxima
     annual_max = compute_annual_maxima(df)
-    annual_max.to_csv("EXTREME_VALUE_MODELLING/output/annual_maxima.csv")
+    annual_max.to_csv(f"{OUTPUT_DIR}/annual_maxima.csv")
 
-    pot_peaks, threshold = compute_pot(
+    # POT
+    pot_peaks, threshold, lambda_year, total_years = compute_pot(
         df,
         THRESHOLD_QUANTILE,
         DECLUSTER_HOURS
     )
-    pot_peaks.to_csv("EXTREME_VALUE_MODELLING/output/pot_peaks.csv")
 
-    with open("EXTREME_VALUE_MODELLING/output/threshold.txt", "w") as f:
+    pot_peaks.to_csv(f"{OUTPUT_DIR}/pot_peaks.csv")
+
+    with open(f"{OUTPUT_DIR}/threshold.txt", "w") as f:
         f.write(str(threshold))
 
+    with open(f"{OUTPUT_DIR}/lambda_year.txt", "w") as f:
+        f.write(str(lambda_year))
 
-    print("Done")
+    with open(f"{OUTPUT_DIR}/total_years.txt", "w") as f:
+        f.write(str(total_years))
+
+    print("\nDone")
     print(f"Threshold: {threshold:.2f} m")
-    print(f"Annual maxima count: {len(annual_max)}")
-    print(f"POT peaks count: {len(pot_peaks)}")
+    print(f"POT peaks: {len(pot_peaks)}")
+    print(f"Fractional years: {total_years:.3f}")
+    print(f"Lambda (clusters/year): {lambda_year:.4f}")

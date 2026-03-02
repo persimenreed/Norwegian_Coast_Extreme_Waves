@@ -51,8 +51,11 @@ DATA_EXTRACTION/wam800_partitioned
 
 # misc
 NORA3_extraction
-WAFO
-WW3_extraction
+depth
 cache
 Forecast
-Bias_correcting
+BIAS_CORRECTION/dataset
+BIAS_CORRECTION/output
+*.nc
+*.parquet
+*.csv

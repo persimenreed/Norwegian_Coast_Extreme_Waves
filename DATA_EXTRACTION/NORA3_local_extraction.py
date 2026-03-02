@@ -1,11 +1,11 @@
 from metocean_api import ts
 
-# Fauskane
 
+##### Stavanger #####
 wind_wave_ts = ts.TimeSeries(
-    lon=5.72684,
-    lat=62.5672,
-    start_time="1959-01-01",
+    lon=5.4146939,
+    lat=58.9141135,
+    start_time="1969-09-01",
     end_time="2025-11-30",
     product="NORA3_wind_wave"
 )
@@ -20,8 +20,8 @@ wind_wave_ts.import_data(save_csv=True, save_nc=False, use_cache=True)
 # wind_wave_ts = ts.TimeSeries(
 #     lon=5.72684,
 #     lat=62.5672,
-#     start_time="1959-01-01",
-#     end_time="2025-11-31",
+#     start_time="1969-09-01",
+#     end_time="2025-11-30",
 #     product="NORA3_wind_wave"
 # )
 
@@ -29,8 +29,8 @@ wind_wave_ts.import_data(save_csv=True, save_nc=False, use_cache=True)
 # wind_wave_ts = ts.TimeSeries(
 #     lon=4.662131,
 #     lat=60.732916,
-#     start_time="1959-01-01",
-#     end_time="2025-11-31",
+#     start_time="1969-09-01",
+#     end_time="2025-11-30",
 #     product="NORA3_wind_wave"
 # )
 
@@ -38,29 +38,29 @@ wind_wave_ts.import_data(save_csv=True, save_nc=False, use_cache=True)
 ######### TEST LOCATIONS ###########
 ####################################
 
-##### LOCATION 1 #####
+##### Kristiansund #####
 # wind_wave_ts = ts.TimeSeries(
-#     lon=,
-#     lat=,
-#     start_time="1959-01-01",
-#     end_time="2025-11-31",
+#     lon=7.570590,
+#     lat=63.189756,
+#     start_time="1969-09-01",
+#     end_time="2025-11-30",
 #     product="NORA3_wind_wave"
 # )
 
-##### LOCATION 2 #####
+##### Bergen #####
 # wind_wave_ts = ts.TimeSeries(
-#     lon=,
-#     lat=,
-#     start_time="1959-01-01",
-#     end_time="2025-11-31",
+#     lon=4.8303750,
+#     lat=60.3809388,
+#     start_time="1969-09-01",
+#     end_time="2025-11-30",
 #     product="NORA3_wind_wave"
 # )
 
-##### LOCATION 3 #####
+##### Stavanger #####
 # wind_wave_ts = ts.TimeSeries(
-#     lon=,
-#     lat=,
-#     start_time="1959-01-01",
-#     end_time="2025-11-31",
+#     lon=5.4146939,
+#     lat=58.9141135,
+#     start_time="1969-09-01",
+#     end_time="2025-11-30",
 #     product="NORA3_wind_wave"
 # )

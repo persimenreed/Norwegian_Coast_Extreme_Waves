@@ -1,6 +1,7 @@
 import xarray as xr
 import pandas as pd
 import os
+from tqdm.auto import tqdm
 
 # ==========================================
 # CONFIGURATION
@@ -9,8 +10,8 @@ import os
 ATM_BASE_URL = "https://thredds.met.no/thredds/dodsC/nora3_subset_atmos/atm_hourly_v2/"
 WAV_BASE_URL = "https://thredds.met.no/thredds/dodsC/nora3_subset_wave/wave_tser/"
 
-START_DATE = "2010-01-01"
-END_DATE   = "2025-10-01"
+START_DATE = "1959-01-01"
+END_DATE   = "2010-10-01"
 
 LAT_MIN = 57.932274
 LAT_MAX = 63.609142
@@ -53,7 +54,7 @@ WAV_VARS = [
 start_year = pd.to_datetime(START_DATE).year
 end_year   = pd.to_datetime(END_DATE).year
 
-for year in range(start_year, end_year + 1):
+for year in tqdm(range(start_year, end_year + 1), desc="Years"):
 
     atm_output = f"{OUTPUT_DIR}/nora3_atm_{year}.parquet"
     wav_output = f"{OUTPUT_DIR}/nora3_wave_{year}.parquet"
@@ -69,7 +70,7 @@ for year in range(start_year, end_year + 1):
     yearly_wav = []
 
     # Loop through months
-    for month in range(1, 13):
+    for month in tqdm(range(1, 13), desc=f"{year} months", leave=False):
 
         month_start = pd.Timestamp(year=year, month=month, day=1)
 
