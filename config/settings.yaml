@@ -1,0 +1,31 @@
+{
+  "locations": {
+    "buoys": ["fedjeosen", "fauskane"],
+    "study_areas": ["kristiansund", "stavanger"]
+  },
+
+  "methods": ["linear", "qm", "rf"],
+
+  "columns": {
+    "time": "time",
+    "hs_model": "hs",
+    "hs_obs": "Significant_Wave_Height_Hm0",
+    "per_model": "tm2",
+    "per_obs": "Wave_Mean_Period_Tm02"
+  },
+
+  "thresholds": {
+    "evt_threshold_quantile": 0.95,
+    "decluster_hours": 48.0,
+    "evt_min_events": 20,
+    "evt_return_periods": [2, 5, 10, 20, 50],
+    "evt_bootstrap_samples": 1000
+  },
+
+  "paths": {
+    "pairs": "data/input/nora3_buoy_combined/NORA3_{location}_pairs.csv",
+    "hindcast_raw": "data/input/nora3_locations/NORA3_wind_wave_{location}_1969_2025.csv",
+    "corrected": "data/output/{location}/hindcast_corrected_{corr_method}.csv",
+    "evt_results_root": "results/extreme_value_modelling"
+  }
+}
