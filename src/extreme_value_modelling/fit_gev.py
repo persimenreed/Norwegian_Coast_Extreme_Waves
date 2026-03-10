@@ -12,10 +12,6 @@ from src.extreme_value_modelling.parameter_summary import update_parameter_summa
 from src.extreme_value_modelling.distribution_plots import gev_plots
 from src.settings import get_path_template, get_evt_bootstrap_samples
 
-# ==========================
-# CONFIG
-# ==========================
-
 T_VALUES = np.arange(1, 51, dtype=float)
 N_BOOTSTRAP = get_evt_bootstrap_samples()
 CONF_LEVEL = 0.95
@@ -23,16 +19,19 @@ EPS = 1e-6
 
 
 def gev_return_level(T, c, loc, scale):
-
     p = np.clip(1 - 1 / np.asarray(T, dtype=float), EPS, 1 - EPS)
-
     return genextreme.ppf(p, c, loc=loc, scale=scale)
 
 
-def run(location, mode, corr_method="qm", pooling=False, transfer=False,
+def run(location, mode, corr_method="pqm", pooling=False, transfer_source=None,
         n_bootstrap=N_BOOTSTRAP, conf_level=CONF_LEVEL):
 
-    dataset = dataset_name(mode, corr_method, pooling, transfer)
+    dataset = dataset_name(
+        mode,
+        corr_method=corr_method,
+        pooling=pooling,
+        transfer_source=transfer_source,
+    )
     root = Path(get_path_template("evt_results_root"))
     annual_path = root / location / "preprocessing" / "annual_maxima.csv"
     df = pd.read_csv(annual_path)
@@ -45,17 +44,9 @@ def run(location, mode, corr_method="qm", pooling=False, transfer=False,
     if len(data) < 5:
         raise ValueError("Too few annual maxima")
 
-    # ==========================
-    # FIT GEV
-    # ==========================
-
     shape, loc, scale = genextreme.fit(data)
     xi = -shape
     rl_full = gev_return_level(T_VALUES, shape, loc, scale)
-
-    # ==========================
-    # BOOTSTRAP
-    # ==========================
 
     boot_rl = np.full((n_bootstrap, len(T_VALUES)), np.nan)
 
@@ -65,7 +56,6 @@ def run(location, mode, corr_method="qm", pooling=False, transfer=False,
         try:
             b_shape, b_loc, b_scale = genextreme.fit(synthetic)
             boot_rl[b] = gev_return_level(T_VALUES, b_shape, b_loc, b_scale)
-
         except Exception:
             continue
 
@@ -74,16 +64,8 @@ def run(location, mode, corr_method="qm", pooling=False, transfer=False,
     ci_low = np.quantile(boot_rl, alpha / 2, axis=0)
     ci_high = np.quantile(boot_rl, 1 - alpha / 2, axis=0)
 
-    # ==========================
-    # OUTPUT DIRECTORY
-    # ==========================
-
     out_dir = resolve_output_dir(location, dataset)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # ==========================
-    # DISTRIBUTION DIAGNOSTICS
-    # ==========================
 
     gev_plots(
         data=data,
@@ -93,10 +75,6 @@ def run(location, mode, corr_method="qm", pooling=False, transfer=False,
         out_dir=out_dir,
         dataset=dataset
     )
-
-    # ==========================
-    # PARAMETER SUMMARY
-    # ==========================
 
     update_parameter_summary({
         "location": location,
@@ -109,10 +87,6 @@ def run(location, mode, corr_method="qm", pooling=False, transfer=False,
         "threshold": None,
         "years": None,
     })
-
-    # ==========================
-    # RETURN LEVEL TABLE
-    # ==========================
 
     table = pd.DataFrame({
         "return_period": T_VALUES.astype(int),
@@ -128,21 +102,20 @@ def run(location, mode, corr_method="qm", pooling=False, transfer=False,
 
 
 def main():
-
     parser = argparse.ArgumentParser()
-
     parser.add_argument("--location")
     parser.add_argument("--mode", choices=["raw", "corrected"])
-    parser.add_argument("--corr-method", default="qm")
+    parser.add_argument("--corr-method", default="pqm")
     parser.add_argument("--pooling", action="store_true")
-
+    parser.add_argument("--transfer-source", default=None)
     args = parser.parse_args()
 
     run(
         args.location,
         args.mode,
         args.corr_method,
-        args.pooling
+        args.pooling,
+        args.transfer_source,
     )
 
 

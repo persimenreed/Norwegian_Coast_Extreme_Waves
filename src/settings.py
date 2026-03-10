@@ -21,12 +21,43 @@ def get_thresholds():
     return load_settings().get("thresholds", {})
 
 
+def get_validation_settings():
+    return load_settings().get("validation", {})
+
+
+def get_dagqm_settings():
+    return load_settings().get("dagqm", {})
+
+
+def get_ml_settings():
+    return load_settings().get("ml", {})
+
+
+def get_method_settings(name: str):
+    return get_ml_settings().get(name, {})
+
+
+def get_default_ml_features():
+    return list(get_ml_settings().get("default_features", []))
+
+
 def get_locations():
     return load_settings().get("locations", {})
 
 
+def get_core_buoy_locations():
+    return list(get_locations().get("core_buoys", []))
+
+
+def get_external_validation_buoys():
+    return list(get_locations().get("external_validation_buoys", []))
+
+
 def get_buoy_locations():
-    return list(get_locations().get("buoys", []))
+    return get_core_buoy_locations() + [
+        b for b in get_external_validation_buoys()
+        if b not in get_core_buoy_locations()
+    ]
 
 
 def get_study_area_locations():
@@ -45,7 +76,7 @@ def get_methods():
     methods = load_settings().get("methods", [])
     if methods:
         return list(methods)
-    return ["linear", "qm", "rf"]
+    return ["linear", "pqm", "dagqm", "gam", "gpr", "xgboost", "transformer"]
 
 
 def get_path_template(name: str) -> str:
@@ -57,6 +88,7 @@ def get_path_template(name: str) -> str:
 
 def format_path(name: str, **kwargs) -> str:
     return get_path_template(name).format(**kwargs)
+
 
 def get_evt_return_periods():
     return get_thresholds().get("evt_return_periods", [10, 20, 50])

@@ -1,0 +1,103 @@
+import argparse
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+SUMMARY_ROOT = Path("results/extreme_value_modelling")
+OUT = Path("results/extreme_value_analysis/return_level_delta")
+
+
+def load_summary(location):
+    path = SUMMARY_ROOT / location / "summary_return_levels.csv"
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return pd.read_csv(path)
+
+
+def dataset_label(d):
+    if d == "raw":
+        return "raw"
+    if d.startswith("local_"):
+        return d.replace("local_", "local: ")
+    if d.startswith("transfer_"):
+        return d.replace("transfer_", "transfer: ")
+    if d.startswith("pooled_"):
+        return d.replace("pooled_", "pooled: ")
+    return d
+
+
+def plot_delta(location, datasets):
+    df = load_summary(location)
+
+    for model in ["GEV", "GPD"]:
+        sub = df[df["model"] == model].copy()
+        raw = sub[sub["dataset"] == "raw"].copy().sort_values("return_period")
+
+        if raw.empty:
+            print(f"No raw dataset found for {location} / {model}")
+            continue
+
+        T_raw = raw["return_period"].values
+        RL_raw = raw["return_level"].values
+
+        plt.figure(figsize=(8, 5))
+
+        for d in datasets:
+            if d == "raw":
+                continue
+
+            cur = sub[sub["dataset"] == d].copy().sort_values("return_period")
+            if cur.empty:
+                continue
+
+            merged = raw[["return_period", "return_level"]].rename(
+                columns={"return_level": "rl_raw"}
+            ).merge(
+                cur[["return_period", "return_level"]].rename(
+                    columns={"return_level": "rl_cur"}
+                ),
+                on="return_period",
+                how="inner",
+            )
+
+            if merged.empty:
+                continue
+
+            delta = merged["rl_cur"].values - merged["rl_raw"].values
+            plt.plot(
+                merged["return_period"].values,
+                delta,
+                marker="o",
+                label=dataset_label(d),
+            )
+
+        plt.axhline(0, color="k", linestyle="--", linewidth=1)
+        plt.xlabel("Return period (years)")
+        plt.ylabel("Δ return level vs raw (m)")
+        plt.title(f"{model} return-level change — {location}")
+        plt.grid(alpha=0.3)
+        plt.legend()
+
+        OUT.mkdir(parents=True, exist_ok=True)
+        out_path = OUT / f"{location}_{model.lower()}_delta_vs_raw.png"
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=300)
+        plt.close()
+
+        print(f"Saved {out_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--location", required=True)
+    parser.add_argument("--datasets", nargs="+", required=True)
+    args = parser.parse_args()
+
+    plot_delta(args.location, args.datasets)
+
+
+if __name__ == "__main__":
+    main()

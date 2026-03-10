@@ -11,11 +11,7 @@ from src.extreme_value_modelling.common import dataset_name
 from src.extreme_value_modelling.parameter_summary import update_parameter_summary
 from src.extreme_value_modelling.distribution_plots import gpd_plots
 from src.extreme_value_modelling.extreme_preprocessing import compute_pot, load_data
-from src.settings import get_thresholds, get_evt_bootstrap_samples
-
-# ==========================
-# CONFIG
-# ==========================
+from src.settings import get_thresholds, get_evt_bootstrap_samples, get_path_template
 
 T_VALUES = np.arange(1, 51, dtype=float)
 N_BOOTSTRAP = get_evt_bootstrap_samples()
@@ -23,60 +19,54 @@ CONF_LEVEL = 0.95
 
 
 def gpd_return_level(T, xi, sigma, threshold, lambda_rate):
-
     z = np.clip(lambda_rate * np.asarray(T, dtype=float), 1e-12, None)
     if abs(xi) < 1e-6:
         return threshold + sigma * np.log(z)
-
     return threshold + (sigma / xi) * (z ** xi - 1)
 
 
-def run(location, mode, corr_method="qm", pooling=False, transfer=False,
+def run(location, mode, corr_method="pqm", pooling=False, transfer_source=None,
         n_bootstrap=N_BOOTSTRAP, conf_level=CONF_LEVEL):
 
-    dataset = dataset_name(mode, corr_method, pooling, transfer)
+    dataset = dataset_name(
+        mode,
+        corr_method=corr_method,
+        pooling=pooling,
+        transfer_source=transfer_source,
+    )
     thresholds = get_thresholds()
     q = thresholds.get("evt_threshold_quantile", 0.95)
     decluster = thresholds.get("decluster_hours", 48)
 
-    # ==========================
-    # LOAD POT PEAKS
-    # ==========================
-
-    evt_root = Path(__import__("src.settings", fromlist=["get_path_template"]).get_path_template("evt_results_root"))
+    evt_root = Path(get_path_template("evt_results_root"))
     pot_path = evt_root / location / "preprocessing" / "pot_peaks.csv"
     df = pd.read_csv(pot_path)
+
     if dataset not in df.columns:
         raise ValueError(f"{dataset} not found in pot_peaks.csv")
 
     peaks = pd.to_numeric(df[dataset], errors="coerce").dropna().values
-
     if len(peaks) < 10:
         raise ValueError("Too few POT peaks")
 
-    # ==========================
-    # COMPUTE THRESHOLD + RATE
-    # ==========================
-
-    input_path = resolve_input_path(location, mode, corr_method, pooling)
+    input_path = resolve_input_path(
+        location,
+        mode,
+        corr_method=corr_method,
+        pooling=pooling,
+        transfer_source=transfer_source,
+    )
     source = load_data(str(input_path))
     _, threshold, lambda_rate, total_years = compute_pot(source, q, decluster)
+
     excess = peaks - threshold
     excess = excess[excess > 0]
 
     if len(excess) < 10:
         raise ValueError("Too few excesses")
 
-    # ==========================
-    # FIT GPD
-    # ==========================
-
     shape, _, scale = genpareto.fit(excess, floc=0)
     rl_full = gpd_return_level(T_VALUES, shape, scale, threshold, lambda_rate)
-
-    # ==========================
-    # BOOTSTRAP
-    # ==========================
 
     boot_rl = np.full((n_bootstrap, len(T_VALUES)), np.nan)
 
@@ -94,16 +84,8 @@ def run(location, mode, corr_method="qm", pooling=False, transfer=False,
     ci_low = np.quantile(boot_rl, alpha / 2, axis=0)
     ci_high = np.quantile(boot_rl, 1 - alpha / 2, axis=0)
 
-    # ==========================
-    # OUTPUT DIRECTORY
-    # ==========================
-
     out_dir = resolve_output_dir(location, dataset)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # ==========================
-    # DISTRIBUTION DIAGNOSTICS
-    # ==========================
 
     gpd_plots(
         excess=excess,
@@ -113,10 +95,6 @@ def run(location, mode, corr_method="qm", pooling=False, transfer=False,
         out_dir=out_dir,
         dataset=dataset
     )
-
-    # ==========================
-    # PARAMETER SUMMARY
-    # ==========================
 
     update_parameter_summary({
         "location": location,
@@ -144,22 +122,22 @@ def run(location, mode, corr_method="qm", pooling=False, transfer=False,
 
 
 def main():
-
     parser = argparse.ArgumentParser()
-
     parser.add_argument("--location")
     parser.add_argument("--mode", choices=["raw", "corrected"])
-    parser.add_argument("--corr-method", default="qm")
+    parser.add_argument("--corr-method", default="pqm")
     parser.add_argument("--pooling", action="store_true")
-
+    parser.add_argument("--transfer-source", default=None)
     args = parser.parse_args()
 
     run(
         args.location,
         args.mode,
         args.corr_method,
-        args.pooling
+        args.pooling,
+        args.transfer_source,
     )
+
 
 if __name__ == "__main__":
     main()

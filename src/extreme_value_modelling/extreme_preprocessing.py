@@ -18,7 +18,6 @@ DECLUSTER_HOURS = float(_THRESHOLDS.get("decluster_hours", 48.0))
 
 
 def load_data(path: str) -> pd.DataFrame:
-
     df = pd.read_csv(path, comment="#")
 
     if "Significant_Wave_Height_Hm0" in df.columns and HS_COLUMN not in df.columns:
@@ -38,7 +37,6 @@ def load_data(path: str) -> pd.DataFrame:
 
 
 def compute_annual_maxima(df):
-
     annual_max = df[HS_COLUMN].resample("YE").max().dropna()
 
     first_year = df.index.min().year
@@ -126,10 +124,21 @@ def _update_wide_csv(path: Path, index_name: str, series: pd.Series, col_name: s
     out.to_csv(path, index=False)
 
 
-def run(location: str, mode: str, corr_method: str = "qm", pooling: bool = False, transfer: bool = False):
-    dataset = dataset_name(mode, corr_method=corr_method, pooling=pooling, transfer=transfer)
+def run(location: str, mode: str, corr_method: str = "pqm", pooling: bool = False, transfer_source: str | None = None):
+    dataset = dataset_name(
+        mode,
+        corr_method=corr_method,
+        pooling=pooling,
+        transfer_source=transfer_source,
+    )
 
-    input_path = resolve_input_path(location, mode, corr_method=corr_method, pooling=pooling, transfer=transfer)
+    input_path = resolve_input_path(
+        location,
+        mode,
+        corr_method=corr_method,
+        pooling=pooling,
+        transfer_source=transfer_source,
+    )
     df = load_data(str(input_path))
 
     annual_max = compute_annual_maxima(df)
@@ -156,14 +165,21 @@ def run(location: str, mode: str, corr_method: str = "qm", pooling: bool = False
 
 
 def main():
-    parser = argparse.ArgumentParser(description="EVT preprocessing: annual maxima + POT declustering (wide tables).")
+    parser = argparse.ArgumentParser(description="EVT preprocessing: annual maxima + POT declustering.")
     parser.add_argument("--location", default="fauskane")
     parser.add_argument("--mode", default="corrected", choices=["raw", "corrected"])
-    parser.add_argument("--corr-method", default="qm")
+    parser.add_argument("--corr-method", default="pqm")
     parser.add_argument("--pooling", action="store_true")
+    parser.add_argument("--transfer-source", default=None)
     args = parser.parse_args()
 
-    res = run(args.location, args.mode, args.corr_method, args.pooling)
+    res = run(
+        args.location,
+        args.mode,
+        args.corr_method,
+        args.pooling,
+        args.transfer_source,
+    )
     print(f"Updated preprocessing tables for {args.location} / {res['dataset']}")
     print(f"  annual_maxima: {res['annual_path']}")
     print(f"  pot_peaks:     {res['pot_path']}")

@@ -10,13 +10,24 @@ def normalize_mode(mode: str) -> str:
     return m
 
 
-def resolve_input_path(location: str, mode: str, corr_method: str = "qm", pooling: bool = False, transfer: bool = False) -> Path:
+def resolve_input_path(
+    location: str,
+    mode: str,
+    corr_method: str = "pqm",
+    pooling: bool = False,
+    transfer_source: str | None = None,
+) -> Path:
     mode = normalize_mode(mode)
 
     if mode == "raw":
         return Path(format_path("hindcast_raw", location=location))
 
-    ds = dataset_name(mode="corrected", corr_method=corr_method, pooling=pooling, transfer=transfer)
+    ds = dataset_name(
+        mode="corrected",
+        corr_method=corr_method,
+        pooling=pooling,
+        transfer_source=transfer_source,
+    )
     return Path(f"data/output/{location}/hindcast_corrected_{ds}.csv")
 
 

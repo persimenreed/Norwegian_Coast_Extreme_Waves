@@ -1,61 +1,92 @@
 import numpy as np
 
-def twrmse(model, obs):
-    """
-    Threshold-weighted RMSE.
-    Gives larger weight to larger observed values.
-    """
 
+def _clean(model, obs):
     model = np.asarray(model, float)
     obs = np.asarray(obs, float)
-
     m = np.isfinite(model) & np.isfinite(obs)
+    return model[m], obs[m]
 
-    if np.sum(m) < 20:
+
+def bias(model, obs):
+    model, obs = _clean(model, obs)
+    if len(obs) == 0:
+        return np.nan
+    return float(np.nanmean(model - obs))
+
+
+def rmse(model, obs):
+    model, obs = _clean(model, obs)
+    if len(obs) == 0:
+        return np.nan
+    return float(np.sqrt(np.nanmean((model - obs) ** 2)))
+
+
+def mae(model, obs):
+    model, obs = _clean(model, obs)
+    if len(obs) == 0:
+        return np.nan
+    return float(np.nanmean(np.abs(model - obs)))
+
+
+def corrcoef(model, obs):
+    model, obs = _clean(model, obs)
+    if len(obs) < 3:
+        return np.nan
+    if np.nanstd(model) == 0 or np.nanstd(obs) == 0:
+        return np.nan
+    return float(np.corrcoef(model, obs)[0, 1])
+
+
+def scatter_index(model, obs):
+    model, obs = _clean(model, obs)
+    if len(obs) == 0:
+        return np.nan
+    mean_obs = float(np.nanmean(obs))
+    if mean_obs == 0:
+        return np.nan
+    return float(np.sqrt(np.nanmean((model - obs) ** 2)) / mean_obs)
+
+
+def twrmse(model, obs):
+    model, obs = _clean(model, obs)
+
+    if len(obs) < 20:
         return np.nan
 
-    model = model[m]
-    obs = obs[m]
+    mean_obs = np.nanmean(obs)
+    if not np.isfinite(mean_obs) or mean_obs == 0:
+        return np.nan
 
-    w = obs / np.nanmean(obs)
+    w = obs / mean_obs
+    return float(np.sqrt(np.nanmean(w * (model - obs) ** 2)))
 
-    return float(
-        np.sqrt(
-            np.nanmean(w * (model - obs) ** 2)
-        )
-    )
 
 def quantile_score(model, obs, q):
-
-    model = np.asarray(model, float)
-    obs = np.asarray(obs, float)
+    model, obs = _clean(model, obs)
+    if len(obs) == 0:
+        return np.nan
 
     e = obs - model
-
-    return float(np.nanmean(
-        np.maximum(q * e, (q - 1) * e)
-    ))
-
-def rmse(a, b):
-    return float(np.sqrt(np.nanmean((a - b) ** 2)))
-
-def mae(a, b):
-    return float(np.nanmean(np.abs(a - b)))
+    return float(np.nanmean(np.maximum(q * e, (q - 1) * e)))
 
 
 def tail_rmse(model, obs, q):
+    model, obs = _clean(model, obs)
+    if len(obs) < 20:
+        return np.nan
 
     thr = np.nanquantile(obs, q)
     mask = obs >= thr
 
-    if mask.sum() < 20:
+    if np.sum(mask) < 20:
         return np.nan
 
     return rmse(model[mask], obs[mask])
 
 
 def q_bias(model, obs, q):
-
+    model, obs = _clean(model, obs)
     if len(obs) < 20:
         return np.nan
 
@@ -66,6 +97,9 @@ def q_bias(model, obs, q):
 
 
 def exceed_rate_bias(model, obs, q):
+    model, obs = _clean(model, obs)
+    if len(obs) < 20:
+        return np.nan
 
     thr = np.nanquantile(obs, q)
 
@@ -76,20 +110,17 @@ def exceed_rate_bias(model, obs, q):
 
 
 def compute_metrics(name, model, obs):
-
-    model = np.asarray(model, float)
-    obs = np.asarray(obs, float)
-
-    m = np.isfinite(model) & np.isfinite(obs)
-
-    model = model[m]
-    obs = obs[m]
+    model, obs = _clean(model, obs)
 
     return {
         "method": name,
+        "n": int(len(obs)),
 
+        "bias": bias(model, obs),
         "mae": mae(model, obs),
         "rmse": rmse(model, obs),
+        "corr": corrcoef(model, obs),
+        "scatter_index": scatter_index(model, obs),
 
         "tail_rmse_95": tail_rmse(model, obs, 0.95),
         "tail_rmse_99": tail_rmse(model, obs, 0.99),
