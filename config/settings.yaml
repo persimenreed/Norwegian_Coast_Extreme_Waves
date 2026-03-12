@@ -13,7 +13,8 @@
     "gpr",
     "xgboost",
     "transformer",
-    "ensemble"
+    "ensemble",
+    "ensemble_xgboost"
   ],
 
   "columns": {
