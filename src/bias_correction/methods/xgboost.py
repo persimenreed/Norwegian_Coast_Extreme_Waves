@@ -85,6 +85,8 @@ def fit(df):
         learning_rate=float(cfg.get("learning_rate", 0.05)),
         subsample=float(cfg.get("subsample", 0.8)),
         colsample_bytree=float(cfg.get("colsample_bytree", 0.8)),
+        gamma=float(cfg.get("gamma", 0.0)),
+        min_child_weight=float(cfg.get("min_child_weight", 1.0)),
         reg_alpha=float(cfg.get("reg_alpha", 0.0)),
         reg_lambda=float(cfg.get("reg_lambda", 1.0)),
         random_state=int(cfg.get("random_state", 1)),

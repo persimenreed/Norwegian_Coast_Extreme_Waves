@@ -42,10 +42,15 @@ def add_time_features(df):
 def add_direction_features(df):
     out = df.copy()
 
-    if DIR_MODEL in out.columns:
+    if DIR_MODEL in out.columns and "dir_sin" not in out.columns:
         ang = np.deg2rad(pd.to_numeric(out[DIR_MODEL], errors="coerce"))
         out["dir_sin"] = np.sin(ang)
         out["dir_cos"] = np.cos(ang)
+
+    if "wind_direction_10m" in out.columns and "wind_dir_sin" not in out.columns:
+        ang = np.deg2rad(pd.to_numeric(out["wind_direction_10m"], errors="coerce"))
+        out["wind_dir_sin"] = np.sin(ang)
+        out["wind_dir_cos"] = np.cos(ang)
 
     return out
 

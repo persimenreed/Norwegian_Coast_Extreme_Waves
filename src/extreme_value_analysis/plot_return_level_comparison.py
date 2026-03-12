@@ -8,16 +8,26 @@ OUT = Path("results/extreme_value_analysis/comparison")
 
 LOCATIONS = ["fauskane", "fedjeosen"]
 MODELS = ["GEV", "GPD"]
-PERIOD_GROUPS = {
-    "2_5_10": [2, 5, 10],
-    "10_20_50": [10, 20, 50],
+PERIODS = [10, 20, 50]
+DATASET_GROUPS = {
+    "local": "local_",
+    "transfer": "transfer_",
 }
 
 
-def plot(location, model, periods):
+def plot(location, model, periods, group_name, prefix):
 
     df = pd.read_csv(ROOT / location / "summary_metrics.csv")
     df = df[df.model == model]
+    df = df[df["dataset"].astype(str).str.startswith(prefix)]
+
+    obs_col = "rl_obs" if "rl_obs" in df.columns else "rl_raw"
+    model_col = "rl_model"
+
+    if obs_col not in df.columns or model_col not in df.columns:
+        raise KeyError(
+            f"Expected columns '{obs_col}' and '{model_col}' in {location}/summary_metrics.csv"
+        )
 
     fig, axes = plt.subplots(1, 3, figsize=(13, 4))
 
@@ -25,7 +35,7 @@ def plot(location, model, periods):
         ax = axes[i]
 
         subset = df[df.return_period == return_period].copy()
-        subset = subset.dropna(subset=["rl_obs", "rl_model"])
+        subset = subset.dropna(subset=[obs_col, model_col])
 
         if subset.empty:
             ax.set_title(f"RL{return_period}")
@@ -36,13 +46,13 @@ def plot(location, model, periods):
 
         for _, row in subset.iterrows():
             ax.scatter(
-                row.rl_obs,
-                row.rl_model,
+                row[obs_col],
+                row[model_col],
                 label=row.dataset,
             )
 
-        obs = subset.rl_obs.to_numpy(dtype=float)
-        model_vals = subset.rl_model.to_numpy(dtype=float)
+        obs = subset[obs_col].to_numpy(dtype=float)
+        model_vals = subset[model_col].to_numpy(dtype=float)
         center = float(np.mean(obs))
 
         max_dev = max(
@@ -81,11 +91,12 @@ def plot(location, model, periods):
             frameon=False,
         )
 
+    fig.suptitle(f"{location} - {model} ({group_name})")
 
     OUT.mkdir(parents=True, exist_ok=True)
 
     period_tag = "_".join(str(p) for p in periods)
-    path = OUT / f"{location}_{period_tag}_{model.lower()}.png"
+    path = OUT / f"{location}_{group_name}_{period_tag}_{model.lower()}.png"
 
     plt.tight_layout(rect=(0, 0.17, 1, 0.95))
     plt.savefig(path, dpi=300)
@@ -98,8 +109,8 @@ def main():
 
     for loc in LOCATIONS:
         for model in MODELS:
-            for periods in PERIOD_GROUPS.values():
-                plot(loc, model, periods)
+            for group_name, prefix in DATASET_GROUPS.items():
+                plot(loc, model, PERIODS, group_name, prefix)
 
 
 if __name__ == "__main__":

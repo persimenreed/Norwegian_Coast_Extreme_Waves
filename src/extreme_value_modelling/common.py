@@ -11,6 +11,7 @@ def dataset_name(
     pooling: bool = False,
     transfer_source: str | None = None,
 ) -> str:
+
     mode = str(mode).strip().lower()
 
     if mode == "raw":
@@ -18,6 +19,9 @@ def dataset_name(
 
     if mode != "corrected":
         raise ValueError("mode must be 'raw' or 'corrected'")
+
+    if corr_method == "ensemble":
+        return "ensemble"
 
     if transfer_source:
         return f"transfer_{transfer_source}_{corr_method}"
@@ -95,7 +99,7 @@ def build_evt_summary_metrics(location: str):
             if raw_ref.empty or mod.empty:
                 continue
 
-            for rp in [2, 5, 10, 20, 50]:
+            for rp in [10, 20, 50]:
                 r = raw_ref[raw_ref["return_period"] == rp]
                 m = mod[mod["return_period"] == rp]
 

@@ -11,22 +11,72 @@ from src.extreme_value_modelling.fit_gev import run as run_gev
 from src.extreme_value_modelling.fit_gpd import run as run_gpd
 from src.extreme_value_modelling.diagnostics import run as run_diagnostics
 
-from src.extreme_value_modelling.common import dataset_name, append_return_level_summary, build_evt_summary_metrics
-from src.settings import get_methods, get_locations, get_study_area_locations
+from src.extreme_value_modelling.common import (
+    dataset_name,
+    append_return_level_summary,
+    build_evt_summary_metrics,
+)
+from src.extreme_value_modelling.paths import resolve_input_path
+from src.settings import (
+    get_methods,
+    get_all_locations,
+    get_core_buoy_locations,
+    get_external_validation_buoys,
+    get_study_area_locations,
+)
 
 
-# ==========================================================
-# RUN SINGLE DATASET
-# ==========================================================
+def _validate_method(method: str) -> str:
+    methods = list(get_methods()) + ["ensemble"]
+    if method not in methods:
+        raise ValueError(
+            f"Unknown correction method '{method}'. Available methods: {methods}"
+        )
 
-def run_single(location: str,
-               mode: str,
-               corr_method: str = "qm",
-               pooling: bool = False,
-               diagnostics: bool = False,
-               transfer: bool = False):
+    return method
 
-    dataset = dataset_name(mode, corr_method=corr_method, pooling=pooling, transfer=transfer)
+
+def _input_exists(
+    location: str,
+    mode: str,
+    corr_method: str = "pqm",
+    pooling: bool = False,
+    transfer_source: str | None = None,
+) -> bool:
+    path = resolve_input_path(
+        location=location,
+        mode=mode,
+        corr_method=corr_method,
+        pooling=pooling,
+        transfer_source=transfer_source,
+    )
+    return Path(path).exists()
+
+
+def run_single(
+    location: str,
+    mode: str,
+    corr_method: str = "pqm",
+    pooling: bool = False,
+    transfer_source: str | None = None,
+    diagnostics: bool = False,
+):
+    dataset = dataset_name(
+        mode,
+        corr_method=corr_method,
+        pooling=pooling,
+        transfer_source=transfer_source,
+    )
+
+    if not _input_exists(
+        location=location,
+        mode=mode,
+        corr_method=corr_method,
+        pooling=pooling,
+        transfer_source=transfer_source,
+    ):
+        print(f"\nSkipping EVT for {location} : {dataset} (input file not found)")
+        return None
 
     print(f"\nRunning EVT for {location} : {dataset}")
 
@@ -35,7 +85,7 @@ def run_single(location: str,
         mode=mode,
         corr_method=corr_method,
         pooling=pooling,
-        transfer=transfer
+        transfer_source=transfer_source,
     )
 
     gev_df = run_gev(
@@ -43,7 +93,7 @@ def run_single(location: str,
         mode=mode,
         corr_method=corr_method,
         pooling=pooling,
-        transfer=transfer
+        transfer_source=transfer_source,
     )
 
     gpd_df = run_gpd(
@@ -51,7 +101,7 @@ def run_single(location: str,
         mode=mode,
         corr_method=corr_method,
         pooling=pooling,
-        transfer=transfer
+        transfer_source=transfer_source,
     )
 
     append_return_level_summary(
@@ -74,199 +124,204 @@ def run_single(location: str,
             mode=mode,
             corr_method=corr_method,
             pooling=pooling,
-            transfer=transfer
+            transfer_source=transfer_source,
         )
 
+    return dataset
 
-# ==========================================================
-# RUN ALL LOCATIONS FOR ONE CORRECTION METHOD
-# ==========================================================
 
-def run_all_for_corr_method(corr_method: str, diagnostics: bool = False):
-
+def run_location_all_methods(location: str, diagnostics: bool = False):
+    core_buoys = set(get_core_buoy_locations())
+    external_buoys = set(get_external_validation_buoys())
+    study_areas = set(get_study_area_locations())
     methods = get_methods()
 
-    if corr_method not in methods:
-        print(f"WARNING: corr_method='{corr_method}' not in get_methods()={methods}. Continuing anyway.")
+    print(f"\nRunning full EVT pipeline for location: {location}")
 
-    locations = get_locations()
-    study_areas = set(get_study_area_locations())
+    run_single(
+        location=location,
+        mode="raw",
+        diagnostics=diagnostics,
+    )
 
-    for location in locations:
+    if location in core_buoys:
+        for method in methods:
+            run_single(
+                location=location,
+                mode="corrected",
+                corr_method=method,
+                pooling=False,
+                diagnostics=diagnostics,
+            )
+
+        for source in get_core_buoy_locations():
+            if source == location:
+                continue
+            for method in methods:
+                run_single(
+                    location=location,
+                    mode="corrected",
+                    corr_method=method,
+                    transfer_source=source,
+                    diagnostics=diagnostics,
+                )
+
+    elif location in external_buoys:
+        for source in get_core_buoy_locations():
+            for method in methods:
+                run_single(
+                    location=location,
+                    mode="corrected",
+                    corr_method=method,
+                    transfer_source=source,
+                    diagnostics=diagnostics,
+                )
+
+        for method in methods:
+            run_single(
+                location=location,
+                mode="corrected",
+                corr_method=method,
+                pooling=True,
+                diagnostics=diagnostics,
+            )
+
+    elif location in study_areas:
+        for method in methods:
+            run_single(
+                location=location,
+                mode="corrected",
+                corr_method=method,
+                pooling=True,
+                diagnostics=diagnostics,
+            )
+
+    else:
+        raise ValueError(f"Unknown location role for '{location}'")
+
+    build_evt_summary_metrics(location)
+    print("\nEVT pipeline complete.")
+
+def run_all_for_method(method: str, diagnostics: bool = False):
+    method = _validate_method(method)
+
+    if method == "ensemble":
+
+        location = "vestfjorden"
 
         print(f"\n==============================")
         print(f"LOCATION: {location}")
+        print(f"METHOD:   ensemble")
         print(f"==============================")
 
-        # RAW
+        run_single(
+            location=location,
+            mode="corrected",
+            corr_method="ensemble",
+            diagnostics=diagnostics,
+        )
+
+        build_evt_summary_metrics(location)
+        return
+
+    for location in get_all_locations():
+
+        print(f"\n==============================")
+        print(f"LOCATION: {location}")
+        print(f"METHOD:   {method}")
+        print(f"==============================")
+
+        # raw baseline
         run_single(
             location=location,
             mode="raw",
             diagnostics=diagnostics
         )
 
-        # corrected local
-        if location not in study_areas:
+        if location in set(get_core_buoy_locations()):
+
             run_single(
                 location=location,
                 mode="corrected",
-                corr_method=corr_method,
-                pooling=False,
+                corr_method=method,
                 diagnostics=diagnostics
             )
 
-        # corrected pooled
-        run_single(
-            location=location,
-            mode="corrected",
-            corr_method=corr_method,
-            pooling=True,
-            diagnostics=diagnostics
-        )
+            for source in get_core_buoy_locations():
+                if source == location:
+                    continue
 
-        # OBSERVED
-        if location not in study_areas:
+                run_single(
+                    location=location,
+                    mode="corrected",
+                    corr_method=method,
+                    transfer_source=source,
+                    diagnostics=diagnostics
+                )
+
+        elif location in set(get_external_validation_buoys()):
+
+            for source in get_core_buoy_locations():
+
+                run_single(
+                    location=location,
+                    mode="corrected",
+                    corr_method=method,
+                    transfer_source=source,
+                    diagnostics=diagnostics
+                )
+
             run_single(
                 location=location,
-                mode="observed",
+                mode="corrected",
+                corr_method=method,
+                pooling=True,
                 diagnostics=diagnostics
             )
 
+        elif location in set(get_study_area_locations()):
 
-# ==========================================================
-# MAIN
-# ==========================================================
+            run_single(
+                location=location,
+                mode="corrected",
+                corr_method=method,
+                pooling=True,
+                diagnostics=diagnostics
+            )
+
+        build_evt_summary_metrics(location)
+
 
 def main():
-
-    parser = argparse.ArgumentParser(description="Run Extreme Value Modelling pipeline.")
-
-    parser.add_argument("--location", help="Location name (e.g. fauskane). If omitted, runs all.")
-
-    parser.add_argument(
-        "--mode",
-        choices=["raw", "corrected"],
-        help="If set, run only this mode (single location)."
+    parser = argparse.ArgumentParser(
+        description="Run EVT either for one location (all methods) or one method (all locations)."
     )
 
-    parser.add_argument(
-        "--corr-method",
-        default="qm",
-        help="Correction method."
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--location",
+        help="Run EVT for this location across all methods.",
+    )
+    group.add_argument(
+        "--method",
+        help="Run EVT for this method across all locations.",
     )
 
-    parser.add_argument(
-        "--pooling",
-        action="store_true",
-        help="Use pooled corrected dataset (single run)."
-    )
-
-    parser.add_argument(
-        "--all-for-corr-method",
-        action="store_true",
-        help="Run all locations for the given --corr-method."
-    )
-
-    parser.add_argument(
-        "--diagnostics",
-        action="store_true",
-        help="Run EVT diagnostic plots."
-    )
+    parser.add_argument("--diagnostics", action="store_true", help="Run EVT diagnostic plots.")
 
     args = parser.parse_args()
 
-    # ======================================================
-    # RUN ALL LOCATIONS
-    # ======================================================
-
-    if args.all_for_corr_method:
-
-        run_all_for_corr_method(
-            corr_method=args.corr_method,
-            diagnostics=args.diagnostics
-        )
-
-        return
-
-    # ======================================================
-    # SINGLE LOCATION REQUIRED
-    # ======================================================
-
-    if not args.location:
-        raise ValueError("Either provide --location or use --all-for-corr-method.")
-
-    # ======================================================
-    # SINGLE MODE RUN
-    # ======================================================
-
-    if args.mode:
-
-        run_single(
-            location=args.location,
-            mode=args.mode,
-            corr_method=args.corr_method,
-            pooling=args.pooling,
-            diagnostics=args.diagnostics
-        )
-
-        return
-
-    # ======================================================
-    # DEFAULT FULL PIPELINE
-    # ======================================================
-
-    location = args.location
-    methods = get_methods()
-    study_areas = set(get_study_area_locations())
-
-    print(f"\nRunning full EVT pipeline for location: {location}")
-
-    # RAW
-    run_single(
-        location=location,
-        mode="raw",
-        diagnostics=args.diagnostics
-    )
-
-    # CORRECTED METHODS
-    for method in methods:
-
-        if location not in study_areas:
-
-            # local
-            run_single(
-                location=location,
-                mode="corrected",
-                corr_method=method,
-                pooling=False,
-                diagnostics=args.diagnostics
-            )
-
-            # transfer
-            run_single(
-                location=location,
-                mode="corrected",
-                corr_method=method,
-                pooling=False,
-                transfer=True,
-                diagnostics=args.diagnostics
-            )
-
-        run_single(
-            location=location,
-            mode="corrected",
-            corr_method=method,
-            pooling=True,
-            diagnostics=args.diagnostics
-        )
-
-    from src.settings import get_buoy_locations
-
     if args.location:
-        if args.location in get_buoy_locations():
-            build_evt_summary_metrics(args.location)
+        run_location_all_methods(
+            location=args.location,
+            diagnostics=args.diagnostics,
+        )
+        return
 
-    print("\nEVT pipeline complete.")
+    run_all_for_method(
+        method=args.method,
+        diagnostics=args.diagnostics,
+    )
 
 
 if __name__ == "__main__":

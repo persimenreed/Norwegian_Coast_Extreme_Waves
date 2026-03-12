@@ -209,25 +209,28 @@ def _predict(model, x, batch_size, device):
 
 # ── public API ───────────────────────────────────────────────────────────────
 
-def fit(df):
+def fit(df, trial=None):
     _require_torch()
     cfg = get_method_settings("transformer")
     seed = _cfg_int(cfg, "random_state", 1)
     _set_seed(seed)
 
-    # prepare data
     work = df.copy()
+
     if TIME in work.columns:
         work[TIME] = pd.to_datetime(work[TIME], errors="coerce")
         sort_cols = ["source", TIME] if "source" in work.columns else [TIME]
         work = work.sort_values(sort_cols).reset_index(drop=True)
 
     work = prepare_ml_dataframe(work)
+
     features = resolve_feature_columns(work, cfg.get("features", []))
     seq_len = _cfg_int(cfg, "sequence_length", 24)
 
-    y = (pd.to_numeric(work[HS_OBS], errors="coerce").to_numpy(np.float32)
-         - pd.to_numeric(work[HS_MODEL], errors="coerce").to_numpy(np.float32))
+    y = (
+        pd.to_numeric(work[HS_OBS], errors="coerce").to_numpy(np.float32)
+        - pd.to_numeric(work[HS_MODEL], errors="coerce").to_numpy(np.float32)
+    )
 
     valid = np.isfinite(y)
     pos = np.flatnonzero(valid)
@@ -239,19 +242,20 @@ def fit(df):
     if len(pos) < min_train:
         raise ValueError("Too few valid samples for transformer.")
 
-    # chronological train / val split on valid-target positions
-    n_val = min(max(min_val, int(round(len(pos) * val_frac))),
-                max(0, len(pos) - min_train))
+    n_val = min(
+        max(min_val, int(round(len(pos) * val_frac))),
+        max(0, len(pos) - min_train),
+    )
+
     train_pos = pos[:-n_val] if n_val > 0 else pos
     val_pos = pos[-n_val:] if n_val > 0 else np.array([], dtype=int)
 
-    # scaling (fitted on training rows only)
     fit_mask = np.zeros(len(work), dtype=bool)
     fit_mask[train_pos] = True
+
     fill, mean, std = _fit_scaler(work, features, fit_mask)
     X = _scale_features(work, features, fill, mean, std)
 
-    # segment ids & sequence windows
     src_col = "source" if "source" in work.columns else None
     seg = _segment_ids(work, TIME, source_col=src_col)
 
@@ -260,15 +264,19 @@ def fit(df):
         m[positions] = True
         return m & valid
 
-    X_train, y_train, _ = _make_sequences(X, y, seg, seq_len, _target_mask(train_pos))
+    X_train, y_train, _ = _make_sequences(
+        X, y, seg, seq_len, _target_mask(train_pos)
+    )
+
     if len(X_train) < min_train:
         raise ValueError("Too few full-window sequences for transformer training.")
-    X_val, y_val, _ = _make_sequences(X, y, seg, seq_len, _target_mask(val_pos))
 
-    # build model
+    X_val, y_val, _ = _make_sequences(
+        X, y, seg, seq_len, _target_mask(val_pos)
+    )
+
     device = _resolve_device()
     use_cuda = device.type == "cuda"
-    print("transformer device:", device)
 
     model_cfg = dict(
         d_model=_cfg_int(cfg, "d_model", 64),
@@ -277,8 +285,11 @@ def fit(df):
         dim_feedforward=_cfg_int(cfg, "dim_feedforward", 128),
         dropout=_cfg_float(cfg, "dropout", 0.1),
     )
+
     model = _TransformerModel(
-        n_features=X_train.shape[2], seq_len=seq_len, **model_cfg,
+        n_features=X_train.shape[2],
+        seq_len=seq_len,
+        **model_cfg,
     ).to(device)
 
     optimizer = torch.optim.AdamW(
@@ -286,61 +297,105 @@ def fit(df):
         lr=_cfg_float(cfg, "learning_rate", 1e-3),
         weight_decay=_cfg_float(cfg, "weight_decay", 1e-4),
     )
+
     loss_fn = nn.HuberLoss(delta=1.0)
     batch_size = _cfg_int(cfg, "batch_size", 64)
 
-    train_dl = _loader(X_train, y_train, batch_size, shuffle=True,
-                       use_cuda=use_cuda, seed=seed)
-    val_dl = (_loader(X_val, y_val, batch_size, shuffle=False,
-                      use_cuda=use_cuda, seed=seed) if len(X_val) else None)
+    train_dl = _loader(
+        X_train,
+        y_train,
+        batch_size,
+        shuffle=True,
+        use_cuda=use_cuda,
+        seed=seed,
+    )
 
-    best_state, best_val, no_improve = None, np.inf, 0
+    val_dl = (
+        _loader(
+            X_val,
+            y_val,
+            batch_size,
+            shuffle=False,
+            use_cuda=use_cuda,
+            seed=seed,
+        )
+        if len(X_val)
+        else None
+    )
+
+    best_state = None
+    best_val = np.inf
+    no_improve = 0
+
     max_epochs = _cfg_int(cfg, "max_epochs", 200)
     patience = _cfg_int(cfg, "patience", 20)
 
-    for _ in range(max_epochs):
-        # training
+    for epoch in range(max_epochs):
+
         model.train()
+
         for xb, yb in train_dl:
             xb = xb.to(device, non_blocking=use_cuda).contiguous()
             yb = yb.to(device, non_blocking=use_cuda)
-            # float32 only — fp16 autocast triggers CUBLAS errors on V100.
             optimizer.zero_grad(set_to_none=True)
             loss = loss_fn(model(xb), yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-        # validation / early stopping
         if val_dl is not None:
+
             model.eval()
             with torch.no_grad():
-                vloss = np.mean([
-                    loss_fn(
-                        model(xb.to(device, non_blocking=use_cuda).contiguous()),
-                        yb.to(device, non_blocking=use_cuda),
-                    ).item()
-                    for xb, yb in val_dl
-                ])
+                vloss = np.mean(
+                    [
+                        loss_fn(
+                            model(xb.to(device, non_blocking=use_cuda).contiguous()),
+                            yb.to(device, non_blocking=use_cuda),
+                        ).item()
+                        for xb, yb in val_dl
+                    ]
+                )
+
+            # ---------------------------
+            # Optuna pruning (optional)
+            # ---------------------------
+
+            if trial is not None:
+                trial.report(vloss, epoch)
+                if trial.should_prune():
+                    import optuna
+                    raise optuna.exceptions.TrialPruned()
             if vloss < best_val:
-                best_val, no_improve = vloss, 0
-                best_state = {k: v.detach().cpu().clone()
-                              for k, v in model.state_dict().items()}
+                best_val = vloss
+                no_improve = 0
+                best_state = {
+                    k: v.detach().cpu().clone()
+                    for k, v in model.state_dict().items()
+                }
             else:
                 no_improve += 1
                 if no_improve >= patience:
                     break
         else:
-            best_state = {k: v.detach().cpu().clone()
-                          for k, v in model.state_dict().items()}
+            best_state = {
+                k: v.detach().cpu().clone()
+                for k, v in model.state_dict().items()
+            }
 
     if best_state is not None:
         model.load_state_dict(best_state)
+
     model = model.to("cpu").eval()
 
     return {
-        "features": features, "fill": fill, "mean": mean, "std": std,
-        "seq_len": seq_len, "config": model_cfg, "device": device.type,
+        "features": features,
+        "fill": fill,
+        "mean": mean,
+        "std": std,
+        "seq_len": seq_len,
+        "config": model_cfg,
+        "device": device.type,
         "model": model,
     }
 

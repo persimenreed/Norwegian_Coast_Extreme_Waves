@@ -18,6 +18,13 @@ METHODS = {
 
 
 def get_method(name):
+    if name == "ensemble":
+        raise ValueError(
+            "The ensemble is not a direct bias-correction method. "
+            "Run experiments/run_ensemble.py instead."
+        )
+
     if name not in METHODS:
         raise ValueError(f"Unknown BC method {name}")
+
     return METHODS[name]

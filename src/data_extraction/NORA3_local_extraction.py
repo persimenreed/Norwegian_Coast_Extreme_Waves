@@ -1,10 +1,10 @@
 from metocean_api import ts
 
 
-##### VESTFJORDEN #####
+##### Stavanger #####
 wind_wave_ts = ts.TimeSeries(
-    lon=15.477469,
-    lat=68.2307205,
+    lon=5.4146939,
+    lat=58.9141135,
     start_time="1969-09-01",
     end_time="2025-11-30",
     product="NORA3_wind_wave"

@@ -1,24 +1,113 @@
 {
   "locations": {
-    "buoys": ["fedjeosen", "fauskane"],
-    "study_areas": ["kristiansund", "stavanger"]
+    "core_buoys": ["fedjeosen", "fauskane"],
+    "external_validation_buoys": ["vestfjorden"],
+    "study_areas": ["kristiansund", "stavanger", "bergen"]
   },
 
-  "methods": ["linear", "qm", "rf"],
+  "methods": [
+    "linear",
+    "pqm",
+    "dagqm",
+    "gam",
+    "gpr",
+    "xgboost",
+    "transformer",
+    "ensemble"
+  ],
 
   "columns": {
     "time": "time",
     "hs_model": "hs",
     "hs_obs": "Significant_Wave_Height_Hm0",
     "per_model": "tm2",
-    "per_obs": "Wave_Mean_Period_Tm02"
+    "per_obs": "Wave_Mean_Period_Tm02",
+    "dir_model": "Pdir"
+  },
+
+  "validation": {
+    "local_cv_folds": 4,
+    "local_cv_min_train_samples": 100,
+    "local_cv_min_test_samples": 20,
+    "cv_time_group": "month"
+  },
+
+  "dagqm": {
+    "n_direction_sectors": 8,
+    "min_samples_per_sector": 80,
+    "blend_global_weight": 0.35
+  },
+
+  "ml": {
+    "default_features": [
+      "hs",
+      "tp",
+      "tm2",
+      "hs_sea",
+      "hs_swell",
+      "wind_speed_10m",
+      "wind_speed_100m",
+      "month_sin",
+      "month_cos",
+      "dir_sin",
+      "dir_cos",
+      "wind_dir_sin",
+      "wind_dir_cos"
+    ],
+
+    "xgboost": {
+      "features": [],
+      "min_train_samples": 50,
+      "n_estimators": 300,
+      "max_depth": 4,
+      "learning_rate": 0.05,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8,
+      "gamma": 0.0,
+      "reg_alpha": 0.0,
+      "reg_lambda": 1.0,
+      "random_state": 1
+    },
+
+    "transformer": {
+      "features": [],
+      "sequence_length": 24,
+      "validation_fraction": 0.20,
+      "min_train_samples": 80,
+      "min_val_samples": 20,
+      "batch_size": 64,
+      "max_epochs": 200,
+      "patience": 20,
+      "d_model": 64,
+      "nhead": 4,
+      "num_layers": 2,
+      "dropout": 0.1,
+      "dim_feedforward": 128,
+      "learning_rate": 0.001,
+      "weight_decay": 0.0001,
+      "random_state": 1
+    },
+
+    "gpr": {
+      "features": [],
+      "max_train_samples": 1500,
+      "random_state": 1,
+      "n_restarts_optimizer": 2
+    },
+
+    "gam": {
+      "features": [],
+      "n_splines": 10,
+      "spline_order": 3,
+      "lam_grid": [0.1, 1.0, 10.0]
+    }
   },
 
   "thresholds": {
     "evt_threshold_quantile": 0.95,
     "decluster_hours": 48.0,
     "evt_min_events": 20,
-    "evt_return_periods": [2, 5, 10, 20, 50],
+    "evt_return_periods": [10, 20, 50],
     "evt_bootstrap_samples": 1000
   },
 
@@ -26,6 +115,7 @@
     "pairs": "data/input/nora3_buoy_combined/NORA3_{location}_pairs.csv",
     "hindcast_raw": "data/input/nora3_locations/NORA3_wind_wave_{location}_1969_2025.csv",
     "corrected": "data/output/{location}/hindcast_corrected_{corr_method}.csv",
+    "validation": "data/output/{location}/validation_{corr_method}.csv",
     "evt_results_root": "results/extreme_value_modelling"
   }
 }
