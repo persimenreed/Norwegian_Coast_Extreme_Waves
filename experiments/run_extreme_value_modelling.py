@@ -27,7 +27,7 @@ from src.settings import (
 
 
 def _validate_method(method: str) -> str:
-    methods = list(get_methods()) + ["ensemble"]
+    methods = list(get_methods()) + ["ensemble", "ensemble_xgboost"]
     if method not in methods:
         raise ValueError(
             f"Unknown correction method '{method}'. Available methods: {methods}"
@@ -205,25 +205,37 @@ def run_location_all_methods(location: str, diagnostics: bool = False):
 def run_all_for_method(method: str, diagnostics: bool = False):
     method = _validate_method(method)
 
-    if method == "ensemble":
+    # ----------------------------------------------------------
+    # ENSEMBLE CASE
+    # ----------------------------------------------------------
+    if method in {"ensemble", "ensemble_xgboost"}:
 
-        location = "vestfjorden"
-
-        print(f"\n==============================")
-        print(f"LOCATION: {location}")
-        print(f"METHOD:   ensemble")
-        print(f"==============================")
-
-        run_single(
-            location=location,
-            mode="corrected",
-            corr_method="ensemble",
-            diagnostics=diagnostics,
+        locations = (
+            get_external_validation_buoys()
+            + get_study_area_locations()
         )
 
-        build_evt_summary_metrics(location)
+        for location in locations:
+
+            print(f"\n==============================")
+            print(f"LOCATION: {location}")
+            print(f"METHOD:   {method}")
+            print(f"==============================")
+
+            run_single(
+                location=location,
+                mode="corrected",
+                corr_method=method,
+                diagnostics=diagnostics,
+            )
+
+            build_evt_summary_metrics(location)
+
         return
 
+    # ----------------------------------------------------------
+    # STANDARD METHODS
+    # ----------------------------------------------------------
     for location in get_all_locations():
 
         print(f"\n==============================")
@@ -290,7 +302,6 @@ def run_all_for_method(method: str, diagnostics: bool = False):
             )
 
         build_evt_summary_metrics(location)
-
 
 def main():
     parser = argparse.ArgumentParser(
