@@ -11,7 +11,6 @@ def dataset_name(
     pooling: bool = False,
     transfer_source: str | None = None,
 ) -> str:
-
     mode = str(mode).strip().lower()
 
     if mode == "raw":
@@ -20,8 +19,11 @@ def dataset_name(
     if mode != "corrected":
         raise ValueError("mode must be 'raw' or 'corrected'")
 
-    if corr_method == "ensemble":
-        return "ensemble"
+    # --------------------------------------------------
+    # Ensemble datasets are already standalone
+    # --------------------------------------------------
+    if corr_method in {"ensemble", "ensemble_xgboost"}:
+        return corr_method
 
     if transfer_source:
         return f"transfer_{transfer_source}_{corr_method}"

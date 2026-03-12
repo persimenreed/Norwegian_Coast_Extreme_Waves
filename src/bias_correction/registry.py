@@ -18,9 +18,10 @@ METHODS = {
 
 
 def get_method(name):
-    if name == "ensemble":
+
+    if name in {"ensemble", "ensemble_xgboost"}:
         raise ValueError(
-            "The ensemble is not a direct bias-correction method. "
+            "Ensemble methods are not direct bias-correction methods. "
             "Run experiments/run_ensemble.py instead."
         )
 

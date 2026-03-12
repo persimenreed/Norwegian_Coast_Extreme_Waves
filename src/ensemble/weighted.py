@@ -1,201 +1,178 @@
-from pathlib import Path
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
-from tqdm import tqdm
 
-from src.settings import get_methods, format_path
-
-TIME = "time"
-OBS = "Significant_Wave_Height_Hm0"
-MODEL = "hs"
-MODEL_CORR = "hs_corrected"
-
-
-# -------------------------------------------------------
-# utilities
-# -------------------------------------------------------
-
-def _validation_path(location, method):
-    return Path(format_path("validation", location=location, corr_method=f"pooled_{method}"))
-
-
-def _corrected_path(location, method):
-    return Path(format_path("corrected", location=location, corr_method=f"pooled_{method}"))
-
-
-def _load_validation_table(location, methods):
-
-    merged = None
-
-    for m in tqdm(methods, desc=f"Loading pooled validation members ({location})"):
-
-        path = _validation_path(location, m)
-
-        if not path.exists():
-            raise FileNotFoundError(path)
-
-        df = pd.read_csv(path)
-        df[TIME] = pd.to_datetime(df[TIME], errors="coerce")
-
-        part = df[[TIME, OBS, MODEL_CORR]].rename(
-            columns={
-                OBS: "obs",
-                MODEL_CORR: m,
-            }
-        )
-
-        if merged is None:
-            merged = part
-        else:
-            merged = merged.merge(part[[TIME, m]], on=TIME)
-
-    return merged.dropna()
-
-
-# -------------------------------------------------------
-# objective
-# -------------------------------------------------------
-
-def _rmse(a, b):
-    return np.sqrt(np.mean((a - b) ** 2))
-
-
-def _rmse(a, b):
-    return np.sqrt(np.mean((a - b) ** 2))
-
-
-def _twrmse(pred, obs):
-    mean_obs = np.mean(obs)
-    if mean_obs == 0:
-        return np.nan
-    w = obs / mean_obs
-    return np.sqrt(np.mean(w * (pred - obs) ** 2))
-
-
-def _tail_rmse(pred, obs, q=0.95):
-    thr = np.quantile(obs, q)
-    m = obs >= thr
-    if np.sum(m) < 20:
-        return np.nan
-    return _rmse(pred[m], obs[m])
-
-
-def _q_bias(pred, obs, q=0.95):
-    return np.quantile(pred, q) - np.quantile(obs, q)
-
-
-def _loss(w, X, y):
-    pred = X @ w
-    rmse = _rmse(pred, y)
-    twrmse = _twrmse(pred, y)
-    tail = _tail_rmse(pred, y)
-    qbias = abs(_q_bias(pred, y))
-    # normalize to avoid scale issues
-    mean_obs = np.mean(y)
-    q95_obs = np.quantile(y, 0.95)
-
-    rmse /= mean_obs
-    twrmse /= mean_obs
-    tail = tail / q95_obs if np.isfinite(tail) else rmse
-    qbias /= q95_obs
-
-    return (
-        0.35 * rmse
-        + 0.35 * twrmse
-        + 0.20 * tail
-        + 0.10 * qbias
-    )
-
-
-# -------------------------------------------------------
-# weight fitting
-# -------------------------------------------------------
-
-def fit_weights(location, methods):
-
-    df = _load_validation_table(location, methods)
-
-    X = df[methods].values
-    y = df["obs"].values
-
-    n = len(methods)
-
-    w0 = np.ones(n) / n
-    bounds = [(0, 1)] * n
-    cons = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
-
-    res = minimize(_loss, w0, args=(X, y), bounds=bounds, constraints=cons)
-
-    w = res.x / np.sum(res.x)
-
-    return dict(zip(methods, w))
-
-
-# -------------------------------------------------------
-# application
-# -------------------------------------------------------
-
-def apply(location, methods, weights):
-
-    merged = None
-    base = None
-
-    for m in tqdm(methods, desc=f"Loading pooled hindcast members ({location})"):
-
-        path = _corrected_path(location, m)
-
-        df = pd.read_csv(path)
-        df[TIME] = pd.to_datetime(df[TIME], errors="coerce")
-
-        if base is None:
-            base = df.copy()
-
-        part = df[[TIME, MODEL]].rename(columns={MODEL: m})
-
-        if merged is None:
-            merged = part
-        else:
-            merged = merged.merge(part, on=TIME)
-
-    X = merged[methods].values
-    w = np.array([weights[m] for m in methods])
-
-    ensemble = X @ w
-
-    out = base.merge(
-        merged[[TIME]].assign(hs_ensemble=ensemble),
-        on=TIME,
-    )
-
-    out[MODEL] = out["hs_ensemble"]
-    out = out.drop(columns="hs_ensemble")
-
-    return out
-
-
-# -------------------------------------------------------
-# public API
-# -------------------------------------------------------
-
-def run(location="vestfjorden", methods=None):
-
-    if methods is None:
-        methods = [m for m in get_methods() if m != "ensemble"]
-
-    weights = fit_weights(location, methods)
-
-    df = apply(location, methods, weights)
-
-    out_path = Path(format_path("corrected", location=location, corr_method="ensemble"))
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    df.to_csv(out_path, index=False)
+from src.ensemble.common import (
+    LOCATION,
+    OBS,
+    build_oof_predictions,
+    default_target_locations,
+    default_training_locations,
+    has_validation_members,
+    load_hindcast_member_dataset,
+    load_training_validation_data,
+    load_validation_member_dataset,
+    member_column,
+    normalize_methods,
+    save_hindcast_output,
+    save_validation_output,
+    unique_locations,
+)
+from src.eval_metrics.core import compute_metrics
+
+RANK_METRICS = [
+    "rmse",
+    "mae",
+    "twrmse",
+    "tail_rmse_95",
+    "quantile_score_95",
+    "abs_q95_bias",
+]
+
+
+def score_members(df, methods):
+    obs = pd.to_numeric(df[OBS], errors="coerce").to_numpy(dtype=float)
+    rows = []
+
+    for method in methods:
+        pred = pd.to_numeric(
+            df[member_column(method)],
+            errors="coerce",
+        ).to_numpy(dtype=float)
+
+        row = compute_metrics(method, pred, obs)
+        row["abs_q95_bias"] = abs(row["q95_bias"]) if np.isfinite(row["q95_bias"]) else np.inf
+        rows.append(row)
+
+    metrics = pd.DataFrame(rows).set_index("method")
+
+    for metric in RANK_METRICS:
+        metrics[f"rank_{metric}"] = metrics[metric].rank(method="average")
+
+    rank_cols = [f"rank_{metric}" for metric in RANK_METRICS]
+    metrics["rank_score"] = metrics[rank_cols].mean(axis=1)
+    metrics = metrics.sort_values(["rank_score", "rmse", "tail_rmse_95", "twrmse"])
+    return metrics
+
+
+def fit_simple_average(df, methods, top_k):
+    metrics = score_members(df, methods)
+    top_k = max(1, min(int(top_k), len(methods)))
+    selected = metrics.index[:top_k].tolist()
 
     return {
-        "location": location,
-        "weights": weights,
-        "hindcast_path": str(out_path),
-        "training_mode": "pooled_validation",
-        "application_mode": "pooled_member_level",
+        "methods": list(methods),
+        "selected_methods": selected,
+        "weights": {
+            method: (1.0 / len(selected) if method in selected else 0.0)
+            for method in methods
+        },
+        "member_metrics": metrics,
+    }
+
+
+def predict_simple_average(df, bundle):
+    selected_cols = [member_column(method) for method in bundle["selected_methods"]]
+    pred = df[selected_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
+
+    if pred.isna().any():
+        fallback_cols = [member_column(method) for method in bundle["methods"]]
+        fallback = df[fallback_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
+        pred = pred.fillna(fallback)
+
+    values = pred.to_numpy(dtype=float)
+    if not np.all(np.isfinite(values)):
+        missing = int(np.sum(~np.isfinite(values)))
+        raise ValueError(f"Unable to produce simple ensemble predictions for {missing} rows.")
+
+    return np.clip(values, 0.0, None)
+
+
+def run(
+    train_locations=None,
+    target_locations=None,
+    methods=None,
+    top_k=3,
+    cv_folds=5,
+    output_name="ensemble",
+    member_family="pooled",
+):
+    methods = normalize_methods(methods)
+    train_locations = unique_locations(
+        train_locations or default_training_locations(methods, member_family)
+    )
+    target_locations = unique_locations(
+        target_locations or default_target_locations()
+    )
+
+    train_df = load_training_validation_data(
+        locations=train_locations,
+        methods=methods,
+        member_family=member_family,
+    )
+    bundle = fit_simple_average(train_df, methods, top_k)
+
+    saved_validation = {}
+    oof_pred = build_oof_predictions(
+        train_df,
+        fit_fn=lambda frame: fit_simple_average(frame, methods, top_k),
+        predict_fn=predict_simple_average,
+        n_splits=cv_folds,
+    )
+
+    if oof_pred is not None:
+        for location in target_locations:
+            mask = train_df[LOCATION] == location
+            if not np.any(mask):
+                continue
+            saved_validation[location] = save_validation_output(
+                location=location,
+                df=train_df.loc[mask].reset_index(drop=True),
+                prediction=oof_pred[mask.to_numpy()],
+                output_name=output_name,
+                train_locations=train_locations,
+                member_family=member_family,
+                methods=methods,
+                validation_type="ensemble_oof",
+            )
+
+    for location in target_locations:
+        if location in saved_validation:
+            continue
+        if not has_validation_members(location, methods, member_family):
+            continue
+
+        df_val = load_validation_member_dataset(location, methods, member_family)
+        pred = predict_simple_average(df_val, bundle)
+        saved_validation[location] = save_validation_output(
+            location=location,
+            df=df_val,
+            prediction=pred,
+            output_name=output_name,
+            train_locations=train_locations,
+            member_family=member_family,
+            methods=methods,
+            validation_type="ensemble_apply",
+        )
+
+    saved_hindcast = {}
+    for location in target_locations:
+        df_hind = load_hindcast_member_dataset(location, methods, member_family)
+        pred = predict_simple_average(df_hind, bundle)
+        saved_hindcast[location] = save_hindcast_output(
+            location=location,
+            df=df_hind,
+            prediction=pred,
+            output_name=output_name,
+        )
+
+    return {
+        "name": output_name,
+        "train_locations": train_locations,
+        "target_locations": target_locations,
+        "member_family": member_family,
+        "selected_methods": bundle["selected_methods"],
+        "weights": bundle["weights"],
+        "member_metrics": bundle["member_metrics"],
+        "validation_paths": saved_validation,
+        "hindcast_paths": saved_hindcast,
     }

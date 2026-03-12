@@ -88,7 +88,7 @@ def _plot_single_heatmap(location: str, plot_df: pd.DataFrame, suffix: str):
 def _build_groups(df, location):
     """
     Build plotting groups depending on which methods exist.
-    Ensemble is only added for Vestfjorden and excluded from pooled plots.
+    Special handling for Vestfjorden to avoid massive plots.
     """
 
     methods = df["method"].tolist()
@@ -98,31 +98,45 @@ def _build_groups(df, location):
     transfer = [m for m in methods if m.startswith("transfer_")]
     pooled = [m for m in methods if m.startswith("pooled_")]
     localcv = [m for m in methods if m.startswith("localcv_")]
+
     ensemble = "ensemble" if "ensemble" in methods else None
+    ensemble_xgb = "ensemble_xgboost" if "ensemble_xgboost" in methods else None
+
+    # --------------------------------------------------
+    # Vestfjorden special case
+    # --------------------------------------------------
+
+    if location == "vestfjorden":
+
+        if pooled:
+            groups["pooled"] = ["raw"] + pooled
+
+            if ensemble:
+                groups["pooled"].append("ensemble")
+
+            if ensemble_xgb:
+                groups["pooled"].append("ensemble_xgboost")
+
+        return groups
+
+    # --------------------------------------------------
+    # Other locations
+    # --------------------------------------------------
 
     if localcv:
         groups["localcv"] = ["raw"] + localcv
 
     if transfer:
         groups["transfer"] = ["raw"] + transfer
-        if location == "vestfjorden" and ensemble:
-            groups["transfer"].append("ensemble")
 
     if pooled:
         groups["pooled"] = ["raw"] + pooled
-        if location == "vestfjorden" and ensemble:
-            groups["pooled"].append("ensemble")
 
-    # combined groups
     if transfer and pooled:
         groups["combined"] = ["raw"] + transfer + pooled
-        if location == "vestfjorden" and ensemble:
-            groups["combined"].append("ensemble")
 
     if transfer and localcv:
         groups["combined"] = ["raw"] + localcv + transfer
-        if location == "vestfjorden" and ensemble:
-            groups["combined"].append("ensemble")
 
     return groups
 
