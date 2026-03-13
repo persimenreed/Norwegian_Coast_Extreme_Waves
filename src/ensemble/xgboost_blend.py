@@ -10,13 +10,14 @@ from src.bias_correction.methods.common import (
 from src.ensemble.common import (
     OBS,
     default_target_locations,
-    default_transfer_training_specs,
+    default_training_specs,
     has_validation_members,
     load_hindcast_member_dataset,
     load_training_validation_specs,
     load_validation_member_dataset,
     member_column,
     normalize_methods,
+    save_ensemble_report,
     save_hindcast_output,
     save_validation_output,
     unique_locations,
@@ -135,7 +136,7 @@ def fit_state_gated_ensemble(df, methods, state_features=None):
             "top_features": [],
         }
 
-    cfg = get_method_settings("xgboost")
+    cfg = get_method_settings("ensemble_xgboost")
 
     objective = "binary:logistic" if len(present_classes) == 2 else "multi:softprob"
     eval_metric = "logloss" if len(present_classes) == 2 else "mlogloss"
@@ -194,7 +195,7 @@ def fit_state_gated_ensemble(df, methods, state_features=None):
     }
 
 
-def predict_state_gated_ensemble(df, bundle):
+def predict_state_gated_ensemble(df, bundle, return_weights=False):
     methods = bundle["methods"]
     members = _member_matrix(df, methods)
     n_rows = len(df)
@@ -238,25 +239,31 @@ def predict_state_gated_ensemble(df, bundle):
         missing_rows = int(np.sum(~np.isfinite(pred)))
         raise ValueError(f"Unable to predict ensemble values for {missing_rows} rows.")
 
-    return clip_nonnegative(pred)
+    pred = clip_nonnegative(pred)
+
+    if return_weights:
+        return pred, normalized
+
+    return pred
 
 
 def run(
     location=None,
     methods=None,
-    output_name="ensemble_xgboost",
+    output_name="ensemble_pooling",
 ):
     methods = normalize_methods(methods)
     target_locations = unique_locations(
         [location] if location else default_target_locations()
     )
-    training_specs = default_transfer_training_specs(methods)
+    training_specs = default_training_specs(methods)
     training_labels = [spec["label"] for spec in training_specs]
 
     train_df = load_training_validation_specs(training_specs, methods)
     bundle = fit_state_gated_ensemble(train_df, methods)
 
     saved_validation = {}
+    contributions = {}
     apply_member_family = "pooled"
 
     for target_location in target_locations:
@@ -268,7 +275,11 @@ def run(
             methods,
             apply_member_family,
         )
-        pred = predict_state_gated_ensemble(df_val, bundle)
+        pred, weights = predict_state_gated_ensemble(
+            df_val,
+            bundle,
+            return_weights=True,
+        )
         saved_validation[target_location] = save_validation_output(
             location=target_location,
             df=df_val,
@@ -277,8 +288,12 @@ def run(
             train_locations=training_labels,
             member_family=apply_member_family,
             methods=methods,
-            validation_type="ensemble_external_apply",
+            validation_type="ensemble_pooling_external_apply",
         )
+        contributions.setdefault(target_location, {})["validation_mean_weights"] = {
+            method: float(weights[:, idx].mean())
+            for idx, method in enumerate(methods)
+        }
 
     saved_hindcast = {}
     for target_location in target_locations:
@@ -287,13 +302,31 @@ def run(
             methods,
             apply_member_family,
         )
-        pred = predict_state_gated_ensemble(df_hind, bundle)
+        pred, weights = predict_state_gated_ensemble(
+            df_hind,
+            bundle,
+            return_weights=True,
+        )
         saved_hindcast[target_location] = save_hindcast_output(
             location=target_location,
             df=df_hind,
             prediction=pred,
             output_name=output_name,
         )
+        contributions.setdefault(target_location, {})["hindcast_mean_weights"] = {
+            method: float(weights[:, idx].mean())
+            for idx, method in enumerate(methods)
+        }
+
+    report_path = save_ensemble_report(
+        output_name=output_name,
+        training_labels=training_labels,
+        member_family=apply_member_family,
+        methods=methods,
+        class_counts=bundle["class_counts"],
+        top_features=bundle["top_features"],
+        contributions=contributions,
+    )
 
     return {
         "name": output_name,
@@ -305,4 +338,5 @@ def run(
         "top_features": bundle["top_features"],
         "validation_paths": saved_validation,
         "hindcast_paths": saved_hindcast,
+        "report_path": report_path,
     }

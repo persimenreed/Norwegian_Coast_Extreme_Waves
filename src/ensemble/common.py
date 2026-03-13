@@ -220,7 +220,7 @@ def default_training_locations(methods, member_family="pooled"):
     return out
 
 
-def default_transfer_training_specs(methods):
+def default_training_specs(methods):
     specs = []
     core_buoys = get_core_buoy_locations()
 
@@ -244,7 +244,7 @@ def default_transfer_training_specs(methods):
 
     if not specs:
         raise ValueError(
-            "No transfer validation datasets were found for the core buoys. "
+            "No cross-location validation datasets were found for the core buoys. "
             "Run the transfer bias-correction stage first."
         )
 
@@ -364,4 +364,53 @@ def save_hindcast_output(location, df, prediction, output_name):
     path = output_corrected_path(location, output_name)
     path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(path, index=False)
+    return str(path)
+
+
+def save_ensemble_report(
+    output_name,
+    training_labels,
+    member_family,
+    methods,
+    class_counts,
+    top_features,
+    contributions,
+):
+    out_dir = Path("results/ensemble")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    lines = [
+        f"name: {output_name}",
+        f"training_cases: {' | '.join(training_labels)}",
+        f"application_member_family: {member_family}",
+        f"members: {' | '.join(methods)}",
+        "",
+        "winner_counts:",
+    ]
+
+    for method in methods:
+        lines.append(f"  {method}: {int(class_counts.get(method, 0))}")
+
+    lines.extend(["", "top_features:"])
+    if top_features:
+        for feature, score in top_features:
+            lines.append(f"  {feature}: {float(score):.6f}")
+    else:
+        lines.append("  none")
+
+    for location in sorted(contributions):
+        stats = contributions[location]
+        lines.extend(["", f"location: {location}"])
+
+        for label in ["validation_mean_weights", "hindcast_mean_weights"]:
+            if label not in stats:
+                continue
+
+            lines.append(f"{label}:")
+            for method in methods:
+                value = float(stats[label].get(method, 0.0))
+                lines.append(f"  {method}: {value:.6f}")
+
+    path = out_dir / f"{output_name}_summary.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="ascii")
     return str(path)
