@@ -8,14 +8,12 @@ from src.bias_correction.methods.common import (
     resolve_feature_columns,
 )
 from src.ensemble.common import (
-    LOCATION,
     OBS,
     default_target_locations,
-    default_training_locations,
-    build_oof_predictions,
+    default_transfer_training_specs,
     has_validation_members,
     load_hindcast_member_dataset,
-    load_training_validation_data,
+    load_training_validation_specs,
     load_validation_member_dataset,
     member_column,
     normalize_methods,
@@ -244,77 +242,54 @@ def predict_state_gated_ensemble(df, bundle):
 
 
 def run(
-    train_locations=None,
-    target_locations=None,
+    location=None,
     methods=None,
-    cv_folds=5,
     output_name="ensemble_xgboost",
-    member_family="pooled",
 ):
     methods = normalize_methods(methods)
-    train_locations = unique_locations(
-        train_locations or default_training_locations(methods, member_family)
-    )
     target_locations = unique_locations(
-        target_locations or default_target_locations()
+        [location] if location else default_target_locations()
     )
+    training_specs = default_transfer_training_specs(methods)
+    training_labels = [spec["label"] for spec in training_specs]
 
-    train_df = load_training_validation_data(
-        locations=train_locations,
-        methods=methods,
-        member_family=member_family,
-    )
+    train_df = load_training_validation_specs(training_specs, methods)
     bundle = fit_state_gated_ensemble(train_df, methods)
 
     saved_validation = {}
-    oof_pred = build_oof_predictions(
-        train_df,
-        fit_fn=lambda frame: fit_state_gated_ensemble(frame, methods),
-        predict_fn=predict_state_gated_ensemble,
-        n_splits=cv_folds,
-    )
+    apply_member_family = "pooled"
 
-    if oof_pred is not None:
-        for location in target_locations:
-            mask = train_df[LOCATION] == location
-            if not np.any(mask):
-                continue
-            saved_validation[location] = save_validation_output(
-                location=location,
-                df=train_df.loc[mask].reset_index(drop=True),
-                prediction=oof_pred[mask.to_numpy()],
-                output_name=output_name,
-                train_locations=train_locations,
-                member_family=member_family,
-                methods=methods,
-                validation_type="ensemble_oof",
-            )
-
-    for location in target_locations:
-        if location in saved_validation:
-            continue
-        if not has_validation_members(location, methods, member_family):
+    for target_location in target_locations:
+        if not has_validation_members(target_location, methods, apply_member_family):
             continue
 
-        df_val = load_validation_member_dataset(location, methods, member_family)
+        df_val = load_validation_member_dataset(
+            target_location,
+            methods,
+            apply_member_family,
+        )
         pred = predict_state_gated_ensemble(df_val, bundle)
-        saved_validation[location] = save_validation_output(
-            location=location,
+        saved_validation[target_location] = save_validation_output(
+            location=target_location,
             df=df_val,
             prediction=pred,
             output_name=output_name,
-            train_locations=train_locations,
-            member_family=member_family,
+            train_locations=training_labels,
+            member_family=apply_member_family,
             methods=methods,
-            validation_type="ensemble_apply",
+            validation_type="ensemble_external_apply",
         )
 
     saved_hindcast = {}
-    for location in target_locations:
-        df_hind = load_hindcast_member_dataset(location, methods, member_family)
+    for target_location in target_locations:
+        df_hind = load_hindcast_member_dataset(
+            target_location,
+            methods,
+            apply_member_family,
+        )
         pred = predict_state_gated_ensemble(df_hind, bundle)
-        saved_hindcast[location] = save_hindcast_output(
-            location=location,
+        saved_hindcast[target_location] = save_hindcast_output(
+            location=target_location,
             df=df_hind,
             prediction=pred,
             output_name=output_name,
@@ -322,9 +297,10 @@ def run(
 
     return {
         "name": output_name,
-        "train_locations": train_locations,
+        "training_labels": training_labels,
         "target_locations": target_locations,
-        "member_family": member_family,
+        "training_member_families": [spec["member_family"] for spec in training_specs],
+        "application_member_family": apply_member_family,
         "class_counts": bundle["class_counts"],
         "top_features": bundle["top_features"],
         "validation_paths": saved_validation,

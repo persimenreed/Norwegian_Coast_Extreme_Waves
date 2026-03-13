@@ -5,6 +5,7 @@ import pandas as pd
 
 from src.bias_correction.data import load_hindcast
 from src.settings import (
+    get_core_buoy_locations,
     format_path,
     get_external_validation_buoys,
     get_methods,
@@ -23,14 +24,14 @@ def member_column(method):
 
 
 def normalize_methods(methods=None):
-    available = [m for m in get_methods() if m != "ensemble"]
+    available = [m for m in get_methods() if not str(m).startswith("ensemble")]
 
     if methods is None:
         return available
 
     selected = []
     for method in methods:
-        if method == "ensemble":
+        if str(method).startswith("ensemble"):
             continue
         if method not in available:
             raise ValueError(
@@ -115,7 +116,12 @@ def _merge_member_predictions(parts):
     return merged.sort_values(TIME).reset_index(drop=True)
 
 
-def load_validation_member_dataset(location, methods, member_family="pooled"):
+def load_validation_member_dataset(
+    location,
+    methods,
+    member_family="pooled",
+    group_label=None,
+):
     base = None
     parts = []
 
@@ -140,7 +146,7 @@ def load_validation_member_dataset(location, methods, member_family="pooled"):
     data = base.merge(merged, on=TIME, how="inner")
     member_cols = [member_column(method) for method in methods]
     data = data.dropna(subset=[OBS] + member_cols).reset_index(drop=True)
-    data[LOCATION] = location
+    data[LOCATION] = group_label or location
     return data
 
 
@@ -179,6 +185,21 @@ def load_training_validation_data(locations, methods, member_family="pooled"):
     return data.sort_values([LOCATION, TIME]).reset_index(drop=True)
 
 
+def load_training_validation_specs(specs, methods):
+    frames = [
+        load_validation_member_dataset(
+            location=spec["location"],
+            methods=methods,
+            member_family=spec["member_family"],
+            group_label=spec.get("group_label"),
+        )
+        for spec in specs
+    ]
+
+    data = pd.concat(frames, ignore_index=True)
+    return data.sort_values([LOCATION, TIME]).reset_index(drop=True)
+
+
 def has_validation_members(location, methods, member_family="pooled"):
     return all(validation_path(location, member_family, method).exists() for method in methods)
 
@@ -197,6 +218,37 @@ def default_training_locations(methods, member_family="pooled"):
         )
 
     return out
+
+
+def default_transfer_training_specs(methods):
+    specs = []
+    core_buoys = get_core_buoy_locations()
+
+    for target in core_buoys:
+        for source in core_buoys:
+            if source == target:
+                continue
+
+            member_family = f"transfer_{source}"
+            if not has_validation_members(target, methods, member_family):
+                continue
+
+            specs.append(
+                {
+                    "location": target,
+                    "member_family": member_family,
+                    "group_label": f"{source}_to_{target}",
+                    "label": f"{source}->{target}",
+                }
+            )
+
+    if not specs:
+        raise ValueError(
+            "No transfer validation datasets were found for the core buoys. "
+            "Run the transfer bias-correction stage first."
+        )
+
+    return specs
 
 
 def unique_locations(locations):
