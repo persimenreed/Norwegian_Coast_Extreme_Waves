@@ -9,12 +9,9 @@
     "linear",
     "pqm",
     "dagqm",
-    "gam",
     "gpr",
     "xgboost",
-    "transformer",
-    "ensemble",
-    "ensemble_xgboost"
+    "transformer"
   ],
 
   "columns": {
@@ -40,6 +37,7 @@
   },
 
   "ml": {
+
     "default_features": [
       "hs",
       "tp",
@@ -59,33 +57,47 @@
     "xgboost": {
       "features": [],
       "min_train_samples": 50,
-      "n_estimators": 300,
-      "max_depth": 4,
-      "learning_rate": 0.05,
-      "subsample": 0.8,
-      "colsample_bytree": 0.8,
-      "gamma": 0.0,
-      "reg_alpha": 0.0,
-      "reg_lambda": 1.0,
+      "n_estimators": 213,
+      "max_depth": 8,
+      "learning_rate": 0.06005781482871712,
+      "subsample": 0.8419493729793056,
+      "colsample_bytree": 0.6066764717364604,
+      "gamma": 4.949030989668321,
+      "min_child_weight": 8.994740827785131,
+      "reg_alpha": 8.179219788797322,
+      "reg_lambda": 0.0012047099957342748,
+
       "random_state": 1
     },
 
     "transformer": {
       "features": [],
-      "sequence_length": 24,
+      "sequence_length": 88,
       "validation_fraction": 0.20,
       "min_train_samples": 80,
       "min_val_samples": 20,
-      "batch_size": 64,
+      "batch_size": 32,
       "max_epochs": 200,
       "patience": 20,
-      "d_model": 64,
-      "nhead": 4,
-      "num_layers": 2,
-      "dropout": 0.1,
-      "dim_feedforward": 128,
-      "learning_rate": 0.001,
-      "weight_decay": 0.0001,
+      "d_model": 128,
+      "nhead": 8,
+      "num_layers": 3,
+      "dropout": 0.1587960347907726,
+      "dim_feedforward": 384,
+      "learning_rate": 0.0013557325296974098,
+      "weight_decay": 3.188693678213564e-05,
+      "random_state": 1
+    },
+
+    "ensemble_xgboost": {
+      "n_estimators": 386,
+      "max_depth": 9,
+      "learning_rate": 0.19021874637498384,
+      "subsample": 0.9583319234848616,
+      "colsample_bytree": 0.94588656966263,
+      "gamma": 0.01718981466152432,
+      "reg_alpha": 0.4017946792150369,
+      "reg_lambda": 0.11118190830416234,
       "random_state": 1
     },
 
@@ -94,13 +106,6 @@
       "max_train_samples": 1500,
       "random_state": 1,
       "n_restarts_optimizer": 2
-    },
-
-    "gam": {
-      "features": [],
-      "n_splines": 10,
-      "spline_order": 3,
-      "lam_grid": [0.1, 1.0, 10.0]
     }
   },
 

@@ -149,7 +149,7 @@ def _run_local_cv(location, df_pairs, df_hind, saved, methods):
 def _run_transfer(location, df_hind, df_pairs_target_or_none, saved, methods):
     core_buoys = get_core_buoy_locations()
 
-    if location not in get_buoy_locations():
+    if location not in get_buoy_locations() and location not in get_study_area_locations():
         return
 
     for source in core_buoys:
@@ -251,6 +251,9 @@ def run_bias_correction(location, method=None):
         _run_pooled(location, df_hind, df_pairs_target, saved, methods)
 
     elif location in study_areas:
+        print(f"Running TRANSFER correction for study area {location}")
+        _run_transfer(location, df_hind, None, saved, methods)
+
         print(f"Running POOLED correction for study area {location}")
         _run_pooled(location, df_hind, None, saved, methods)
 

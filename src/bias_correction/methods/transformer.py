@@ -36,21 +36,13 @@ def _set_seed(seed):
 
 
 def _resolve_device():
-    """Pick CUDA when available; enable cudnn benchmark + TF32."""
     _require_torch()
-    if not torch.cuda.is_available():
-        return torch.device("cpu")
-    try:
-        device = torch.device("cuda")
-        torch.zeros(1, device=device)
-    except Exception:
-        return torch.device("cpu")
 
-    if hasattr(torch.backends, "cudnn"):
-        torch.backends.cudnn.benchmark = True
-    matmul = getattr(getattr(torch.backends, "cuda", None), "matmul", None)
-    if matmul is not None and hasattr(matmul, "allow_tf32"):
-        matmul.allow_tf32 = True
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA GPU requested but not available")
+
+    device = torch.device("cuda")
+    torch.backends.cudnn.benchmark = True
     return device
 
 
@@ -192,9 +184,14 @@ def _loader(x, y, batch_size, shuffle, use_cuda, seed):
     ds = TensorDataset(torch.from_numpy(x), torch.from_numpy(y))
     gen = torch.Generator()
     gen.manual_seed(seed)
-    return DataLoader(ds, batch_size=min(batch_size, len(ds)),
-                      shuffle=shuffle, pin_memory=use_cuda, generator=gen)
-
+    return DataLoader(
+        ds,
+        batch_size=min(batch_size, len(ds)),
+        shuffle=shuffle,
+        pin_memory=use_cuda,
+        generator=gen,
+        num_workers=6
+    )
 
 def _predict(model, x, batch_size, device):
     use_cuda = device.type == "cuda"
@@ -277,6 +274,7 @@ def fit(df, trial=None):
 
     device = _resolve_device()
     use_cuda = device.type == "cuda"
+    print(f"[Transformer] Training device: {device}")
 
     model_cfg = dict(
         d_model=_cfg_int(cfg, "d_model", 64),

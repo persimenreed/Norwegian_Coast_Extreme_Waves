@@ -6,7 +6,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.ensemble.xgboost_blend import run as run_pooled_ensemble
+from src.ensemble.xgboost_ensemble_pooling import run as run_pooled_ensemble
+from src.ensemble.xgboost_ensemble_transfer import run as run_transfer_ensemble
 
 
 def _print_paths(title, paths):
@@ -30,8 +31,14 @@ def _print_summary(label, res):
 
     if res["top_features"]:
         print("\nTop XGBoost features:")
-        for name, score in res["top_features"][:10]:
-            print(f"  {name}: {score:.6f}")
+        if isinstance(res["top_features"], dict):
+            for section, values in res["top_features"].items():
+                print(f"  {section}:")
+                for name, score in values[:10]:
+                    print(f"    {name}: {score:.6f}")
+        else:
+            for name, score in res["top_features"][:10]:
+                print(f"  {name}: {score:.6f}")
 
     print(f"\nReport: {res['report_path']}")
     _print_paths("Validation outputs", res["validation_paths"])
@@ -40,17 +47,28 @@ def _print_summary(label, res):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run the pooled ensemble with the default fair training setup."
+        description="Run the XGBoost ensembles with the default transfer-trained setup."
     )
     parser.add_argument(
         "--location",
         default=None,
-        help="Optional target location. Default: run vestfjorden and all study areas.",
+        help="Optional target location.",
+    )
+    parser.add_argument(
+        "--variant",
+        choices=["pooling", "transfer", "both"],
+        default="both",
+        help="Which ensemble variant to run.",
     )
     args = parser.parse_args()
 
-    res = run_pooled_ensemble(location=args.location)
-    _print_summary("Pooled ensemble", res)
+    if args.variant in {"pooling", "both"}:
+        res = run_pooled_ensemble(location=args.location)
+        _print_summary("Pooling ensemble", res)
+
+    if args.variant in {"transfer", "both"}:
+        res = run_transfer_ensemble(location=args.location)
+        _print_summary("Transfer ensemble", res)
 
 
 if __name__ == "__main__":

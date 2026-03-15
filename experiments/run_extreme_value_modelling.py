@@ -27,7 +27,7 @@ from src.settings import (
 
 
 def _validate_method(method: str) -> str:
-    methods = list(get_methods()) + ["ensemble", "ensemble_xgboost"]
+    methods = list(get_methods()) + ["ensemble_pooling", "ensemble_transfer"]
     if method not in methods:
         raise ValueError(
             f"Unknown correction method '{method}'. Available methods: {methods}"
@@ -186,6 +186,19 @@ def run_location_all_methods(location: str, diagnostics: bool = False):
                 diagnostics=diagnostics,
             )
 
+        run_single(
+            location=location,
+            mode="corrected",
+            corr_method="ensemble_transfer",
+            diagnostics=diagnostics,
+        )
+        run_single(
+            location=location,
+            mode="corrected",
+            corr_method="ensemble_pooling",
+            diagnostics=diagnostics,
+        )
+
     elif location in study_areas:
         for method in methods:
             run_single(
@@ -195,6 +208,19 @@ def run_location_all_methods(location: str, diagnostics: bool = False):
                 pooling=True,
                 diagnostics=diagnostics,
             )
+
+        run_single(
+            location=location,
+            mode="corrected",
+            corr_method="ensemble_transfer",
+            diagnostics=diagnostics,
+        )
+        run_single(
+            location=location,
+            mode="corrected",
+            corr_method="ensemble_pooling",
+            diagnostics=diagnostics,
+        )
 
     else:
         raise ValueError(f"Unknown location role for '{location}'")
@@ -208,12 +234,11 @@ def run_all_for_method(method: str, diagnostics: bool = False):
     # ----------------------------------------------------------
     # ENSEMBLE CASE
     # ----------------------------------------------------------
-    if method in {"ensemble", "ensemble_xgboost"}:
-
-        locations = (
-            get_external_validation_buoys()
-            + get_study_area_locations()
-        )
+    if method in {"ensemble_pooling", "ensemble_transfer"}:
+        if method == "ensemble_pooling":
+            locations = get_external_validation_buoys() + get_study_area_locations()
+        else:
+            locations = get_external_validation_buoys() + get_study_area_locations()
 
         for location in locations:
 
@@ -221,6 +246,12 @@ def run_all_for_method(method: str, diagnostics: bool = False):
             print(f"LOCATION: {location}")
             print(f"METHOD:   {method}")
             print(f"==============================")
+
+            run_single(
+                location=location,
+                mode="raw",
+                diagnostics=diagnostics,
+            )
 
             run_single(
                 location=location,

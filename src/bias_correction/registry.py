@@ -1,7 +1,6 @@
 from src.bias_correction.methods import linear
 from src.bias_correction.methods import pqm
 from src.bias_correction.methods import dagqm
-from src.bias_correction.methods import gam
 from src.bias_correction.methods import gpr
 from src.bias_correction.methods import xgboost
 from src.bias_correction.methods import transformer
@@ -10,7 +9,6 @@ METHODS = {
     "linear": linear,
     "pqm": pqm,
     "dagqm": dagqm,
-    "gam": gam,
     "gpr": gpr,
     "xgboost": xgboost,
     "transformer": transformer,
@@ -19,9 +17,9 @@ METHODS = {
 
 def get_method(name):
 
-    if name in {"ensemble", "ensemble_xgboost"}:
+    if name in {"ensemble_pooling", "ensemble_transfer"}:
         raise ValueError(
-            "Ensemble methods are not direct bias-correction methods. "
+            "The ensemble models are not direct bias-correction methods. "
             "Run experiments/run_ensemble.py instead."
         )
 

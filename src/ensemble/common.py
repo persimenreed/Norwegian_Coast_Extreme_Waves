@@ -5,6 +5,7 @@ import pandas as pd
 
 from src.bias_correction.data import load_hindcast
 from src.settings import (
+    get_buoy_locations,
     get_core_buoy_locations,
     format_path,
     get_external_validation_buoys,
@@ -51,6 +52,16 @@ def default_target_locations():
     for location in get_external_validation_buoys() + get_study_area_locations():
         if location not in out:
             out.append(location)
+    return out
+
+
+def default_transfer_target_locations(methods):
+    out = []
+
+    for location in get_external_validation_buoys() + get_study_area_locations():
+        if available_transfer_member_families(location, methods, require_validation=False):
+            out.append(location)
+
     return out
 
 
@@ -116,6 +127,46 @@ def _merge_member_predictions(parts):
     return merged.sort_values(TIME).reset_index(drop=True)
 
 
+def _aggregate_member_frames(base, member_frames, methods):
+    if not member_frames:
+        raise ValueError("No ensemble member tables were loaded.")
+
+    if len(member_frames) == 1:
+        data = base.merge(member_frames[0], on=TIME, how="inner")
+        return data.sort_values(TIME).reset_index(drop=True)
+
+    merged = base.copy()
+
+    for family_idx, frame in enumerate(member_frames):
+        rename_map = {
+            member_column(method): f"{member_column(method)}__family_{family_idx}"
+            for method in methods
+        }
+        merged = merged.merge(
+            frame.rename(columns=rename_map),
+            on=TIME,
+            how="inner",
+        )
+
+    temp_cols = []
+    for method in methods:
+        family_cols = [
+            f"{member_column(method)}__family_{family_idx}"
+            for family_idx in range(len(member_frames))
+        ]
+        temp_cols.extend(family_cols)
+        merged[member_column(method)] = merged[family_cols].apply(
+            pd.to_numeric,
+            errors="coerce",
+        ).mean(axis=1, skipna=True)
+
+    return (
+        merged.drop(columns=temp_cols, errors="ignore")
+        .sort_values(TIME)
+        .reset_index(drop=True)
+    )
+
+
 def load_validation_member_dataset(
     location,
     methods,
@@ -150,6 +201,42 @@ def load_validation_member_dataset(
     return data
 
 
+def load_validation_member_dataset_families(
+    location,
+    methods,
+    member_families,
+    group_label=None,
+):
+    families = list(member_families or [])
+    if not families:
+        raise ValueError("No member families were provided for validation loading.")
+
+    base = None
+    member_frames = []
+
+    for member_family in families:
+        df = load_validation_member_dataset(
+            location=location,
+            methods=methods,
+            member_family=member_family,
+            group_label=group_label,
+        )
+
+        if base is None:
+            base = df.drop(
+                columns=[member_column(method) for method in methods],
+                errors="ignore",
+            ).copy()
+
+        member_frames.append(df[[TIME] + [member_column(method) for method in methods]])
+
+    data = _aggregate_member_frames(base, member_frames, methods)
+    member_cols = [member_column(method) for method in methods]
+    data = data.dropna(subset=[OBS] + member_cols).reset_index(drop=True)
+    data[LOCATION] = group_label or location
+    return data
+
+
 def load_hindcast_member_dataset(location, methods, member_family="pooled"):
     base = load_hindcast(location)
     parts = []
@@ -167,6 +254,27 @@ def load_hindcast_member_dataset(location, methods, member_family="pooled"):
 
     merged = _merge_member_predictions(parts)
     data = base.merge(merged, on=TIME, how="inner")
+    data[LOCATION] = location
+    return data.sort_values(TIME).reset_index(drop=True)
+
+
+def load_hindcast_member_dataset_families(location, methods, member_families):
+    families = list(member_families or [])
+    if not families:
+        raise ValueError("No member families were provided for hindcast loading.")
+
+    base = load_hindcast(location)
+    member_frames = []
+
+    for member_family in families:
+        df = load_hindcast_member_dataset(
+            location=location,
+            methods=methods,
+            member_family=member_family,
+        )
+        member_frames.append(df[[TIME] + [member_column(method) for method in methods]])
+
+    data = _aggregate_member_frames(base, member_frames, methods)
     data[LOCATION] = location
     return data.sort_values(TIME).reset_index(drop=True)
 
@@ -202,6 +310,10 @@ def load_training_validation_specs(specs, methods):
 
 def has_validation_members(location, methods, member_family="pooled"):
     return all(validation_path(location, member_family, method).exists() for method in methods)
+
+
+def has_corrected_members(location, methods, member_family="pooled"):
+    return all(corrected_path(location, member_family, method).exists() for method in methods)
 
 
 def default_training_locations(methods, member_family="pooled"):
@@ -249,6 +361,25 @@ def default_training_specs(methods):
         )
 
     return specs
+
+
+def available_transfer_member_families(location, methods, require_validation=True):
+    families = []
+
+    for source in get_core_buoy_locations():
+        if source == location:
+            continue
+
+        member_family = f"transfer_{source}"
+        path_check = (
+            has_validation_members(location, methods, member_family)
+            if require_validation
+            else has_corrected_members(location, methods, member_family)
+        )
+        if path_check:
+            families.append(member_family)
+
+    return families
 
 
 def unique_locations(locations):
@@ -338,6 +469,7 @@ def save_validation_output(
     member_family,
     methods,
     validation_type,
+    member_families=None,
 ):
     out = _drop_internal_columns(df)
     out["corr_method"] = output_name
@@ -350,6 +482,7 @@ def save_validation_output(
     out["apply_target"] = location
     out["ensemble_member_family"] = member_family
     out["ensemble_members"] = "|".join(methods)
+    out["ensemble_input_families"] = "|".join(member_families or [member_family])
 
     path = output_validation_path(location, output_name)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -357,9 +490,11 @@ def save_validation_output(
     return str(path)
 
 
-def save_hindcast_output(location, df, prediction, output_name):
+def save_hindcast_output(location, df, prediction, output_name, member_families=None):
     out = _drop_internal_columns(df)
     out[MODEL] = prediction
+    if member_families:
+        out["ensemble_input_families"] = "|".join(member_families)
 
     path = output_corrected_path(location, output_name)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -392,7 +527,15 @@ def save_ensemble_report(
         lines.append(f"  {method}: {int(class_counts.get(method, 0))}")
 
     lines.extend(["", "top_features:"])
-    if top_features:
+    if isinstance(top_features, dict):
+        for section, values in top_features.items():
+            lines.append(f"  {section}:")
+            if values:
+                for feature, score in values:
+                    lines.append(f"    {feature}: {float(score):.6f}")
+            else:
+                lines.append("    none")
+    elif top_features:
         for feature, score in top_features:
             lines.append(f"  {feature}: {float(score):.6f}")
     else:
@@ -401,6 +544,9 @@ def save_ensemble_report(
     for location in sorted(contributions):
         stats = contributions[location]
         lines.extend(["", f"location: {location}"])
+
+        if "input_families" in stats:
+            lines.append(f"input_families: {' | '.join(stats['input_families'])}")
 
         for label in ["validation_mean_weights", "hindcast_mean_weights"]:
             if label not in stats:
