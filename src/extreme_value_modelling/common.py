@@ -22,7 +22,7 @@ def dataset_name(
     # --------------------------------------------------
     # Ensemble datasets are already standalone
     # --------------------------------------------------
-    if corr_method in {"ensemble", "ensemble_xgboost"}:
+    if str(corr_method).startswith("ensemble_"):
         return corr_method
 
     if transfer_source:

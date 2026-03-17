@@ -54,50 +54,110 @@
       "wind_dir_cos"
     ],
 
-    "xgboost": {
+    "xgboost_fedjeosen": {
       "features": [],
       "min_train_samples": 50,
-      "n_estimators": 213,
-      "max_depth": 8,
-      "learning_rate": 0.06005781482871712,
-      "subsample": 0.8419493729793056,
-      "colsample_bytree": 0.6066764717364604,
-      "gamma": 4.949030989668321,
-      "min_child_weight": 8.994740827785131,
-      "reg_alpha": 8.179219788797322,
-      "reg_lambda": 0.0012047099957342748,
-
+      "n_estimators": 568,
+      "max_depth": 3,
+      "learning_rate": 0.014661954101826023,
+      "subsample": 0.6340434805917115,
+      "colsample_bytree": 0.7785215325958913,
+      "gamma": 4.629653373871279,
+      "min_child_weight": 1.502693255170842,
+      "reg_alpha": 0.009165063557460204,
+      "reg_lambda": 0.00010783890570782273,
       "random_state": 1
     },
 
-    "transformer": {
+    "xgboost_fauskane": {
       "features": [],
-      "sequence_length": 88,
+      "min_train_samples": 50,
+      "n_estimators": 211,
+      "max_depth": 3,
+      "learning_rate": 0.011479056883177033,
+      "subsample": 0.7174680132513279,
+      "colsample_bytree": 0.7777082436970025,
+      "gamma": 3.876193768243031,
+      "min_child_weight": 6.545384260284073,
+      "reg_alpha": 0.1638042625074711,
+      "reg_lambda": 4.366732927840668,
+      "random_state": 1
+    },
+
+    "transformer_fedjeosen": {
+      "features": [],
+      "sequence_length": 12,
       "validation_fraction": 0.20,
       "min_train_samples": 80,
       "min_val_samples": 20,
-      "batch_size": 32,
+      "batch_size": 64,
+      "max_epochs": 200,
+      "patience": 20,
+      "d_model": 64,
+      "nhead": 8,
+      "num_layers": 3,
+      "dropout": 0.022386085649518734,
+      "dim_feedforward": 192,
+      "learning_rate": 0.0004301144502287501,
+      "weight_decay": 0.000010759693641047906,
+      "random_state": 1
+    },
+
+    "transformer_fauskane": {
+      "features": [],
+      "sequence_length": 15,
+      "validation_fraction": 0.20,
+      "min_train_samples": 80,
+      "min_val_samples": 20,
+      "batch_size": 64,
       "max_epochs": 200,
       "patience": 20,
       "d_model": 128,
       "nhead": 8,
-      "num_layers": 3,
-      "dropout": 0.1587960347907726,
+      "num_layers": 4,
+      "dropout": 0.2500154198734119,
       "dim_feedforward": 384,
-      "learning_rate": 0.0013557325296974098,
-      "weight_decay": 3.188693678213564e-05,
+      "learning_rate": 0.00010412226480399666,
+      "weight_decay": 0.00024819785425067857,
       "random_state": 1
     },
 
     "ensemble_xgboost": {
-      "n_estimators": 386,
-      "max_depth": 9,
-      "learning_rate": 0.19021874637498384,
-      "subsample": 0.9583319234848616,
-      "colsample_bytree": 0.94588656966263,
-      "gamma": 0.01718981466152432,
-      "reg_alpha": 0.4017946792150369,
-      "reg_lambda": 0.11118190830416234,
+      "n_estimators": 319,
+      "max_depth": 3,
+      "learning_rate": 0.08331084858992367,
+      "subsample": 0.6182754480711691,
+      "colsample_bytree": 0.9331267306137774,
+      "gamma": 3.3679260990131494,
+      "min_child_weight": 0.9781399633210647,
+      "reg_alpha": 4.082593658184515,
+      "reg_lambda": 0.007280509370027334,
+      "random_state": 1
+    },
+
+    "ensemble_xgboost_fedjeosen": {
+      "n_estimators": 114,
+      "max_depth": 5,
+      "learning_rate": 0.1448914486807141,
+      "subsample": 0.6585076218028258,
+      "colsample_bytree": 0.7155111441030941,
+      "gamma": 4.743876461535021,
+      "min_child_weight": 0.48008359941419043,
+      "reg_alpha": 0.5454689411401675,
+      "reg_lambda": 0.0021036659645259992,
+      "random_state": 1
+    },
+
+    "ensemble_xgboost_fauskane": {
+      "n_estimators": 703,
+      "max_depth": 8,
+      "learning_rate": 0.16012284526391846,
+      "subsample": 0.6295824000171035,
+      "colsample_bytree": 0.9874356503768347,
+      "gamma": 4.551443569423547,
+      "min_child_weight": 8.162350129661897,
+      "reg_alpha": 0.0004378372957248084,
+      "reg_lambda": 0.09632645720472059,
       "random_state": 1
     },
 

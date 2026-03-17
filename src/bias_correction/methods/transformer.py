@@ -206,9 +206,14 @@ def _predict(model, x, batch_size, device):
 
 # ── public API ───────────────────────────────────────────────────────────────
 
-def fit(df, trial=None):
+def fit(df, trial=None, trial_step_offset=0, settings_name=None):
     _require_torch()
-    cfg = get_method_settings("transformer")
+    if not settings_name:
+        raise ValueError("settings_name must be provided for transformer training.")
+
+    cfg = get_method_settings(settings_name)
+    if not cfg:
+        raise ValueError(f"Missing transformer settings block '{settings_name}'.")
     seed = _cfg_int(cfg, "random_state", 1)
     _set_seed(seed)
 
@@ -360,7 +365,7 @@ def fit(df, trial=None):
             # ---------------------------
 
             if trial is not None:
-                trial.report(vloss, epoch)
+                trial.report(vloss, int(trial_step_offset) + epoch)
                 if trial.should_prune():
                     import optuna
                     raise optuna.exceptions.TrialPruned()

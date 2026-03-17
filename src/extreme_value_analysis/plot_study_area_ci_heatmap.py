@@ -1,4 +1,3 @@
-import argparse
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +12,12 @@ RETURN_PERIOD = 50.0
 STUDY_LOCATIONS = ["stavanger", "bergen", "kristiansund"]
 BUOY_LOCATIONS = ["fauskane", "fedjeosen"]
 MODELS = ["GEV", "GPD"]
+STUDY_DATASETS_DEFAULT = [
+    "raw",
+    "ensemble_fedjeosen",
+    "ensemble_fauskane",
+    "ensemble_combined",
+]
 
 
 def load_summary(location: str) -> pd.DataFrame:
@@ -36,6 +41,14 @@ def dataset_sort_key(name: str):
 
 def dataset_label(name: str) -> str:
     return name
+
+
+def opposite_buoy_location(location: str) -> str | None:
+    mapping = {
+        "fauskane": "fedjeosen",
+        "fedjeosen": "fauskane",
+    }
+    return mapping.get(location)
 
 
 def load_rows(location: str, model: str | None = None, models: list[str] | None = None) -> pd.DataFrame:
@@ -123,7 +136,7 @@ def plot_heatmap(locations, model, datasets=None):
     cbar.set_label("CI width (m)")
 
     OUT.mkdir(parents=True, exist_ok=True)
-    out_path = OUT / f"ciwidth_50yr_{model.lower()}.png"
+    out_path = OUT / f"study_area_CI_50yr_{model.lower()}.png"
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=300)
@@ -135,6 +148,14 @@ def plot_heatmap(locations, model, datasets=None):
 def plot_buoy_model_heatmap(location: str, family_prefix: str):
     df = load_rows(location, models=MODELS)
     keep = discover_datasets([location], MODELS, family_prefix)
+
+    if family_prefix == "transfer":
+        opposite = opposite_buoy_location(location)
+        ensemble_opposite = f"ensemble_{opposite}" if opposite else None
+        available = set(df["dataset"].dropna().astype(str))
+        if ensemble_opposite and ensemble_opposite in available:
+            keep = keep + [ensemble_opposite]
+
     df = df[df["dataset"].isin(keep)].copy()
 
     if df.empty:
@@ -171,7 +192,65 @@ def plot_buoy_model_heatmap(location: str, family_prefix: str):
     cbar.set_label("CI width (m)")
 
     OUT.mkdir(parents=True, exist_ok=True)
-    out_path = OUT / f"ciwidth_50yr_{location}_{family_prefix}_gev_gpd.png"
+    out_path = OUT / f"{location}_CI_50yr_{family_prefix}.png"
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300)
+    plt.close()
+    print(f"Saved {out_path}")
+
+
+def plot_vestfjorden_gev_gpd_heatmap():
+    """Plot combined GEV/GPD heatmap for vestfjorden with ensemble datasets."""
+    try:
+        df = load_rows("vestfjorden", models=MODELS)
+    except FileNotFoundError:
+        print("Skipped vestfjorden: summary_return_levels.csv not found")
+        return
+
+    keep_datasets = [
+        "raw",
+        "ensemble_fauskane",
+        "ensemble_fedjeosen",
+        "ensemble_combined",
+    ]
+
+    df = df[df["dataset"].isin(keep_datasets)].copy()
+
+    if df.empty:
+        print("Skipped vestfjorden: no matching ensemble datasets")
+        return
+
+    pivot = df.pivot_table(index="dataset", columns="model", values="ci_width", aggfunc="first")
+    pivot = pivot.reindex(index=sorted(pivot.index, key=dataset_sort_key))
+    pivot = pivot.reindex(columns=MODELS)
+
+    if "GEV" in pivot.columns:
+        pivot = pivot.sort_values(by="GEV", ascending=True, na_position="last", kind="mergesort")
+
+    vals = pivot.values.astype(float)
+
+    fig, ax = plt.subplots(figsize=(1.4 * len(pivot.columns) + 2.5, 0.45 * len(pivot.index) + 2.5))
+    im = ax.imshow(vals, aspect="auto")
+
+    ax.set_xticks(np.arange(len(pivot.columns)))
+    ax.set_xticklabels(pivot.columns, rotation=0, ha="center")
+    ax.set_yticks(np.arange(len(pivot.index)))
+    ax.set_yticklabels([dataset_label(x) for x in pivot.index])
+
+    norm = im.norm
+    for i in range(vals.shape[0]):
+        for j in range(vals.shape[1]):
+            v = vals[i, j]
+            txt = "nan" if not np.isfinite(v) else f"{v:.2f}"
+            color = "black" if np.isfinite(v) and norm(v) > 0.5 else "white"
+            ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
+
+    ax.set_title("vestfjorden ensemble 50-year CI width")
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("CI width (m)")
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    out_path = OUT / "vestfjorden_CI_50yr_ensemble.png"
     plt.tight_layout()
     plt.savefig(out_path, dpi=300)
     plt.close()
@@ -179,18 +258,17 @@ def plot_buoy_model_heatmap(location: str, family_prefix: str):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.parse_args()
-
-    # 1) Study-area heatmaps: all pooled_* plus raw, one figure per model.
-    study_datasets = discover_datasets(STUDY_LOCATIONS, MODELS, "pooled")
-    plot_heatmap(STUDY_LOCATIONS, "GEV", datasets=study_datasets)
-    plot_heatmap(STUDY_LOCATIONS, "GPD", datasets=study_datasets)
+    # 1) Study-area heatmaps for fixed study locations, one figure per model.
+    plot_heatmap(STUDY_LOCATIONS, "GEV", datasets=STUDY_DATASETS_DEFAULT)
+    plot_heatmap(STUDY_LOCATIONS, "GPD", datasets=STUDY_DATASETS_DEFAULT)
 
     # 2) Buoy heatmaps split by location and dataset family, with GEV/GPD on x-axis.
     for location in BUOY_LOCATIONS:
         plot_buoy_model_heatmap(location, "local")
         plot_buoy_model_heatmap(location, "transfer")
+
+    # 3) Vestfjorden combined GEV/GPD heatmap if available.
+    plot_vestfjorden_gev_gpd_heatmap()
 
 
 if __name__ == "__main__":

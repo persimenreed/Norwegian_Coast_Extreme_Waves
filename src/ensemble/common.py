@@ -24,6 +24,26 @@ def member_column(method):
     return f"member_{method}"
 
 
+def build_member_specs(member_families, methods, include_family_in_label=False):
+    specs = []
+
+    for member_family in member_families:
+        for method in methods:
+            label = method
+            if include_family_in_label:
+                label = f"{member_family}_{method}"
+
+            specs.append(
+                {
+                    "member_family": member_family,
+                    "method": method,
+                    "label": label,
+                }
+            )
+
+    return specs
+
+
 def normalize_methods(methods=None):
     available = [m for m in get_methods() if not str(m).startswith("ensemble")]
 
@@ -125,6 +145,51 @@ def _merge_member_predictions(parts):
         raise ValueError("No ensemble member tables were loaded.")
 
     return merged.sort_values(TIME).reset_index(drop=True)
+
+
+def _member_columns_from_specs(member_specs):
+    return [member_column(spec.get("label", spec["method"])) for spec in member_specs]
+
+
+def load_validation_member_dataset_specs(
+    location,
+    member_specs,
+    group_label=None,
+):
+    specs = list(member_specs or [])
+    if not specs:
+        raise ValueError("No member specs were provided for validation loading.")
+
+    base = None
+    parts = []
+
+    for spec in specs:
+        member_family = spec["member_family"]
+        method = spec["method"]
+        label = spec.get("label", method)
+
+        path = validation_path(location, member_family, method)
+        df = _read_csv(path)
+
+        if MODEL_CORR not in df.columns:
+            raise ValueError(f"Validation file {path} is missing '{MODEL_CORR}'.")
+
+        if OBS not in df.columns:
+            raise ValueError(f"Validation file {path} is missing '{OBS}'.")
+
+        if base is None:
+            base = _strip_validation_columns(df)
+
+        parts.append(
+            df[[TIME, MODEL_CORR]].rename(columns={MODEL_CORR: member_column(label)})
+        )
+
+    merged = _merge_member_predictions(parts)
+    data = base.merge(merged, on=TIME, how="inner")
+    member_cols = _member_columns_from_specs(specs)
+    data = data.dropna(subset=[OBS] + member_cols).reset_index(drop=True)
+    data[LOCATION] = group_label or location
+    return data
 
 
 def _aggregate_member_frames(base, member_frames, methods):
@@ -258,6 +323,35 @@ def load_hindcast_member_dataset(location, methods, member_family="pooled"):
     return data.sort_values(TIME).reset_index(drop=True)
 
 
+def load_hindcast_member_dataset_specs(location, member_specs):
+    specs = list(member_specs or [])
+    if not specs:
+        raise ValueError("No member specs were provided for hindcast loading.")
+
+    base = load_hindcast(location)
+    parts = []
+
+    for spec in specs:
+        member_family = spec["member_family"]
+        method = spec["method"]
+        label = spec.get("label", method)
+
+        path = corrected_path(location, member_family, method)
+        df = _read_csv(path)
+
+        if MODEL not in df.columns:
+            raise ValueError(f"Corrected file {path} is missing '{MODEL}'.")
+
+        parts.append(
+            df[[TIME, MODEL]].rename(columns={MODEL: member_column(label)})
+        )
+
+    merged = _merge_member_predictions(parts)
+    data = base.merge(merged, on=TIME, how="inner")
+    data[LOCATION] = location
+    return data.sort_values(TIME).reset_index(drop=True)
+
+
 def load_hindcast_member_dataset_families(location, methods, member_families):
     families = list(member_families or [])
     if not families:
@@ -293,16 +387,31 @@ def load_training_validation_data(locations, methods, member_family="pooled"):
     return data.sort_values([LOCATION, TIME]).reset_index(drop=True)
 
 
-def load_training_validation_specs(specs, methods):
-    frames = [
-        load_validation_member_dataset(
-            location=spec["location"],
-            methods=methods,
-            member_family=spec["member_family"],
-            group_label=spec.get("group_label"),
+def load_training_validation_specs(specs, methods=None):
+    frames = []
+
+    for spec in specs:
+        if "member_specs" in spec:
+            frames.append(
+                load_validation_member_dataset_specs(
+                    location=spec["location"],
+                    member_specs=spec["member_specs"],
+                    group_label=spec.get("group_label"),
+                )
+            )
+            continue
+
+        if methods is None:
+            raise ValueError("methods must be provided when specs do not define member_specs.")
+
+        frames.append(
+            load_validation_member_dataset(
+                location=spec["location"],
+                methods=methods,
+                member_family=spec["member_family"],
+                group_label=spec.get("group_label"),
+            )
         )
-        for spec in specs
-    ]
 
     data = pd.concat(frames, ignore_index=True)
     return data.sort_values([LOCATION, TIME]).reset_index(drop=True)
@@ -312,8 +421,22 @@ def has_validation_members(location, methods, member_family="pooled"):
     return all(validation_path(location, member_family, method).exists() for method in methods)
 
 
+def has_validation_member_specs(location, member_specs):
+    return all(
+        validation_path(location, spec["member_family"], spec["method"]).exists()
+        for spec in member_specs
+    )
+
+
 def has_corrected_members(location, methods, member_family="pooled"):
     return all(corrected_path(location, member_family, method).exists() for method in methods)
+
+
+def has_corrected_member_specs(location, member_specs):
+    return all(
+        corrected_path(location, spec["member_family"], spec["method"]).exists()
+        for spec in member_specs
+    )
 
 
 def default_training_locations(methods, member_family="pooled"):
@@ -558,5 +681,11 @@ def save_ensemble_report(
                 lines.append(f"  {method}: {value:.6f}")
 
     path = out_dir / f"{output_name}_summary.txt"
-    path.write_text("\n".join(lines) + "\n", encoding="ascii")
+    block = "\n".join(lines) + "\n"
+    if path.exists():
+        with path.open("a", encoding="ascii") as fh:
+            fh.write("\n" + ("=" * 60) + "\n\n")
+            fh.write(block)
+    else:
+        path.write_text(block, encoding="ascii")
     return str(path)

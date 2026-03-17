@@ -10,57 +10,63 @@ import optuna
 
 from src.bias_correction.methods import xgboost
 from src.optuna_parameter_search.common import (
-    evaluate_pooled_cv,
+    evaluate_cv,
     EarlyStoppingCallback
 )
+from src.settings import get_core_buoy_locations
 
 
 # ------------------------------------------------------------
 # Optuna objective
 # ------------------------------------------------------------
 
-def objective(trial):
+def make_objective(source, settings_name):
 
-    params = {
+    def objective(trial):
 
-        "n_estimators": trial.suggest_int("n_estimators", 200, 1200),
+        params = {
 
-        "max_depth": trial.suggest_int("max_depth", 3, 8),
+            "n_estimators": trial.suggest_int("n_estimators", 200, 1200),
 
-        "learning_rate": trial.suggest_float(
-            "learning_rate", 0.01, 0.2, log=True
-        ),
+            "max_depth": trial.suggest_int("max_depth", 3, 8),
 
-        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "learning_rate": trial.suggest_float(
+                "learning_rate", 0.01, 0.2, log=True
+            ),
 
-        "colsample_bytree": trial.suggest_float(
-            "colsample_bytree", 0.6, 1.0
-        ),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
 
-        "gamma": trial.suggest_float("gamma", 0.0, 5.0),
+            "colsample_bytree": trial.suggest_float(
+                "colsample_bytree", 0.6, 1.0
+            ),
 
-        "min_child_weight": trial.suggest_float(
-            "min_child_weight", 0.1, 10.0, log=True
-        ),
+            "gamma": trial.suggest_float("gamma", 0.0, 5.0),
 
-        "reg_alpha": trial.suggest_float(
-            "reg_alpha", 1e-4, 10.0, log=True
-        ),
+            "min_child_weight": trial.suggest_float(
+                "min_child_weight", 0.1, 10.0, log=True
+            ),
 
-        "reg_lambda": trial.suggest_float(
-            "reg_lambda", 1e-4, 10.0, log=True
-        ),
+            "reg_alpha": trial.suggest_float(
+                "reg_alpha", 1e-4, 10.0, log=True
+            ),
 
-        "random_state": 1
-    }
+            "reg_lambda": trial.suggest_float(
+                "reg_lambda", 1e-4, 10.0, log=True
+            ),
 
-    score = evaluate_pooled_cv(
-        "xgboost",
-        xgboost,
-        params
-    )
+            "random_state": 1
+        }
 
-    return score
+        return evaluate_cv(
+            "xgboost",
+            xgboost,
+            params,
+            trial=trial,
+            source=source,
+            settings_name=settings_name,
+        )
+
+    return objective
 
 
 # ------------------------------------------------------------
@@ -70,26 +76,52 @@ def objective(trial):
 def main():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials", type=int, default=1500)
+    parser.add_argument("--trials", type=int, default=500)
+    parser.add_argument(
+        "--storage",
+        default="sqlite:///optuna_xgboost.db",
+    )
+    parser.add_argument(
+        "--source",
+        required=True,
+        help=(
+            "Source buoy to tune for strict transfer, e.g. "
+            "'fedjeosen' or 'fauskane'."
+        ),
+    )
 
     args = parser.parse_args()
 
+    if args.source is not None and args.source not in get_core_buoy_locations():
+        raise ValueError(
+            f"Unknown core-buoy source '{args.source}'. "
+            f"Available: {get_core_buoy_locations()}"
+        )
+
+    settings_name = f"xgboost_{args.source}"
+    study_name = f"xgboost_{args.source}_local_cv"
+
     study = optuna.create_study(
         direction="minimize",
-        study_name="xgboost_spatial_cv",
-        storage="sqlite:///optuna_xgboost.db",
+        study_name=study_name,
+        storage=args.storage,
         load_if_exists=True,
         sampler=optuna.samplers.TPESampler(
             multivariate=True,
+            n_startup_trials=40,
             seed=1
         ),
-        pruner=optuna.pruners.MedianPruner()
+        pruner=optuna.pruners.MedianPruner(
+            n_startup_trials=40,
+            n_warmup_steps=1,
+            interval_steps=1
+        )
     )
 
-    early_stop = EarlyStoppingCallback(patience=200)
+    early_stop = EarlyStoppingCallback(patience=150)
 
     study.optimize(
-        objective,
+        make_objective(source=args.source, settings_name=settings_name),
         n_trials=args.trials,
         callbacks=[early_stop],
         show_progress_bar=True
@@ -98,6 +130,8 @@ def main():
     print("\nBest trial:")
     print("Score:", study.best_trial.value)
     print("Params:", study.best_trial.params)
+    print("Settings key:", settings_name)
+    print("Source:", args.source)
 
 
 if __name__ == "__main__":

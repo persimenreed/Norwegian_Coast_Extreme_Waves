@@ -43,7 +43,7 @@ def _build_sample_weights(df):
     return w
 
 
-def fit(df):
+def fit(df, settings_name=None):
     try:
         from xgboost import XGBRegressor
     except ImportError as e:
@@ -51,7 +51,12 @@ def fit(df):
             "XGBoost is not installed. Install it with: pip install xgboost"
         ) from e
 
-    cfg = get_method_settings("xgboost")
+    if not settings_name:
+        raise ValueError("settings_name must be provided for XGBoost training.")
+
+    cfg = get_method_settings(settings_name)
+    if not cfg:
+        raise ValueError(f"Missing XGBoost settings block '{settings_name}'.")
 
     work = df.copy()
     if TIME in work.columns:
@@ -97,10 +102,18 @@ def fit(df):
 
     model.fit(X_train, y_train, sample_weight=w_train, verbose=False)
 
+    importance = pd.DataFrame(
+        {
+            "feature": features,
+            "importance": model.feature_importances_,
+        }
+    ).sort_values("importance", ascending=False, ignore_index=True)
+
     return {
         "features": features,
         "fill": fill,
         "model": model,
+        "feature_importance": importance,
     }
 
 

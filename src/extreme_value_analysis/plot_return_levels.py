@@ -6,6 +6,7 @@ from pathlib import Path
 
 SUMMARY_ROOT = Path("results/extreme_value_modelling")
 RESULT_DIR = Path("results/extreme_value_analysis")
+YMIN_FLOOR = 8.0
 
 
 def load_summary(location):
@@ -18,6 +19,10 @@ def load_summary(location):
 def dataset_label(d):
     if d == "raw":
         return "raw"
+    if d == "ensemble_pooling":
+        return "ensemble: pooling"
+    if d == "ensemble_transfer":
+        return "ensemble: transfer"
     if d.startswith("local_"):
         return d.replace("local_", "local: ")
     if d.startswith("transfer_"):
@@ -32,6 +37,10 @@ def dataset_tag(datasets):
     for d in datasets:
         if d == "raw":
             tags.append("raw")
+        elif d == "ensemble_pooling":
+            tags.append("ens-pool")
+        elif d == "ensemble_transfer":
+            tags.append("ens-tr")
         elif d.startswith("local_"):
             tags.append(d.replace("local_", "loc-"))
         elif d.startswith("transfer_"):
@@ -76,8 +85,8 @@ def plot_model(df, location, model, datasets, ymin):
     plt.legend()
     plt.xlim(1, 50)
 
-    if ymin is not None:
-        plt.ylim(bottom=ymin)
+    bottom = YMIN_FLOOR if ymin is None else max(YMIN_FLOOR, ymin)
+    plt.ylim(bottom=bottom)
 
     tag = dataset_tag(datasets)
     out_path = RESULT_DIR / "return_level" / location / f"{location}_{model.lower()}_rl_{tag}.png"

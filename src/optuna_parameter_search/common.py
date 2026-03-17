@@ -9,9 +9,11 @@ if str(REPO_ROOT) not in sys.path:
 
 import contextlib
 import copy
+import inspect
 import numpy as np
 
 from src.bias_correction.data import load_pairs
+from src.bias_correction.validation import iter_local_cv_splits
 from src.settings import (
     get_core_buoy_locations,
     get_columns,
@@ -46,18 +48,24 @@ _DF_B = load_pairs(_BUOY_B)
 # ---------------------------------------------------------
 
 @contextlib.contextmanager
-def override_method_settings(method_name, params):
+def override_method_settings(method_name, params, settings_name=None):
 
     settings = load_settings()
+    settings_key = settings_name or method_name
 
-    original = copy.deepcopy(settings["ml"].get(method_name, {}))
+    if settings_key not in settings["ml"]:
+        settings["ml"][settings_key] = copy.deepcopy(
+            settings["ml"].get(method_name, {})
+        )
 
-    settings["ml"][method_name].update(params)
+    original = copy.deepcopy(settings["ml"].get(settings_key, {}))
+
+    settings["ml"][settings_key].update(params)
 
     try:
         yield
     finally:
-        settings["ml"][method_name] = original
+        settings["ml"][settings_key] = original
 
 
 # ---------------------------------------------------------
@@ -98,6 +106,25 @@ def compute_quantile_loss(y_true, y_pred, q=0.95):
     return float(np.mean(loss))
 
 
+def compute_tail_rmse(y_true, y_pred, q=0.95):
+
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    m = np.isfinite(y_true) & np.isfinite(y_pred)
+
+    if np.sum(m) < 20:
+        return np.nan
+
+    thr = np.nanquantile(y_true[m], q)
+    tail = m & (y_true >= thr)
+
+    if np.sum(tail) < 20:
+        return np.nan
+
+    return compute_rmse(y_true[tail], y_pred[tail])
+
+
 # ---------------------------------------------------------
 # Combined metric emphasizing extremes
 # ---------------------------------------------------------
@@ -106,43 +133,97 @@ def compute_extreme_metric(y_true, y_pred):
 
     rmse = compute_rmse(y_true, y_pred)
     qloss = compute_quantile_loss(y_true, y_pred, q=0.95)
+    tail_rmse = compute_tail_rmse(y_true, y_pred, q=0.95)
 
-    return 0.5 * rmse + 0.5 * qloss
-
-
-# ---------------------------------------------------------
-# Spatial cross-validation (Fedjeosen ↔ Fauskane)
-# ---------------------------------------------------------
-
-def evaluate_pooled_cv(method_name, method_module, params, trial=None):
-
-    scores = []
-
-    splits = [
-        (_DF_A, _DF_B),
-        (_DF_B, _DF_A),
+    parts = [
+        (0.35, rmse),
+        (0.35, qloss),
+        (0.30, tail_rmse),
     ]
 
-    for df_train, df_valid in splits:
+    num = sum(w * v for w, v in parts if np.isfinite(v))
+    den = sum(w for w, v in parts if np.isfinite(v))
 
-        with override_method_settings(method_name, params):
+    if den == 0:
+        return np.nan
 
-            if trial is not None:
-                model = method_module.fit(df_train, trial=trial)
-            else:
-                model = method_module.fit(df_train)
+    return float(num / den)
 
-            df_pred = method_module.apply(
-                df_valid.copy(),
-                model
+
+def _fit_with_optional_kwargs(
+    method_module,
+    df_train,
+    trial=None,
+    trial_step_offset=0,
+    settings_name=None,
+):
+    fit_params = inspect.signature(method_module.fit).parameters
+    extra_fit_kwargs = {}
+
+    if "trial_step_offset" in fit_params:
+        extra_fit_kwargs["trial_step_offset"] = trial_step_offset
+    if "settings_name" in fit_params and settings_name is not None:
+        extra_fit_kwargs["settings_name"] = settings_name
+
+    if trial is not None and "trial" in fit_params:
+        return method_module.fit(
+            df_train,
+            trial=trial,
+            **extra_fit_kwargs,
+        )
+
+    return method_module.fit(df_train, **extra_fit_kwargs)
+
+
+def evaluate_cv(method_name, method_module, params, trial=None, source=None, settings_name=None):
+    fit_params = inspect.signature(method_module.fit).parameters
+    has_internal_trial_reporting = trial is not None and "trial" in fit_params
+
+    if source is None:
+        splits = [
+            (0, _DF_A, _DF_B, 1000),
+            (1, _DF_B, _DF_A, 1001),
+        ]
+    else:
+        df_source = load_pairs(source)
+        splits = [
+            (
+                split["fold"],
+                df_source.iloc[split["train_idx"]].copy(),
+                df_source.iloc[split["test_idx"]].copy(),
+                split["fold"] + 1,
             )
+            for split in iter_local_cv_splits(df_source)
+        ]
+        if not splits:
+            raise ValueError(f"No local CV folds were generated for source '{source}'.")
+
+    scores = []
+    for fold_id, df_train, df_valid, report_step in splits:
+        with override_method_settings(
+            method_name,
+            params,
+            settings_name=settings_name,
+        ):
+            model = _fit_with_optional_kwargs(
+                method_module,
+                df_train,
+                trial=trial,
+                trial_step_offset=fold_id * 1000,
+                settings_name=settings_name,
+            )
+            df_pred = method_module.apply(df_valid.copy(), model)
 
         score = compute_extreme_metric(
             df_valid[HS_OBS].values,
-            df_pred[HS_MODEL].values
+            df_pred[HS_MODEL].values,
         )
-
         scores.append(score)
+
+        if trial is not None and not has_internal_trial_reporting:
+            trial.report(float(np.mean(scores)), report_step)
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
 
     return float(np.mean(scores))
 

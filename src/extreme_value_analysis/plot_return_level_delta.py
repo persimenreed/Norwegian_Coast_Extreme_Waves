@@ -74,15 +74,27 @@ def plot_delta(location, datasets):
                 label=dataset_label(d),
             )
 
+        non_raw = [d for d in datasets if d != "raw"]
+        if any(d.startswith("transfer_") for d in non_raw):
+            correction_label = " — transfer bias correction"
+            file_suffix = "_transfer"
+        elif any(d.startswith("local_") for d in non_raw):
+            correction_label = " — local bias correction"
+            file_suffix = "_local"
+        else:
+            correction_label = ""
+            file_suffix = ""
+
         plt.axhline(0, color="k", linestyle="--", linewidth=1)
         plt.xlabel("Return period (years)")
-        plt.ylabel("Δ return level vs raw (m)")
-        plt.title(f"{model} return-level change — {location}")
+        plt.ylabel("delta return level vs raw (m)")
+        plt.title(f"{model} return-level change — {location}{correction_label}")
         plt.grid(alpha=0.3)
         plt.legend()
 
-        OUT.mkdir(parents=True, exist_ok=True)
-        out_path = OUT / f"{location}_{model.lower()}_delta_vs_raw.png"
+        out_dir = OUT / location
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{location}_{model.lower()}_delta_vs_raw{file_suffix}.png"
         plt.tight_layout()
         plt.savefig(out_path, dpi=300)
         plt.close()

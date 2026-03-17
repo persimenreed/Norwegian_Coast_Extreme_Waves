@@ -76,7 +76,7 @@ def get_methods():
     methods = load_settings().get("methods", [])
     if methods:
         return list(methods)
-    return ["linear", "pqm", "dagqm", "gam", "gpr", "xgboost", "transformer"]
+    return ["linear", "pqm", "dagqm", "gpr", "xgboost", "transformer"]
 
 
 def get_path_template(name: str) -> str:

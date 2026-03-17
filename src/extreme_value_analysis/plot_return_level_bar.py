@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
 
 SUMMARY_ROOT = Path("results/extreme_value_modelling")
@@ -33,30 +34,11 @@ def dataset_label(d):
     return d
 
 
-def dataset_group_tag(datasets):
-    groups = set()
-    for d in datasets:
-        if d == "raw":
-            continue
-        if d.startswith("local_"):
-            groups.add("local")
-        elif d.startswith("transfer_"):
-            groups.add("transfer")
-        elif d.startswith("pooled_"):
-            groups.add("pooled")
-        else:
-            groups.add("other")
-
-    if not groups:
-        return "raw"
-    if len(groups) == 1:
-        return next(iter(groups))
-    return "mixed"
 
 
-def plot_location(location, datasets):
+
+def plot_location(location, datasets, output_name=None):
     df = load_summary(location)
-    group_tag = dataset_group_tag(datasets)
 
     # Keep one stable dataset order based on the lowest available 10-year RL across models.
     rp10 = df[np.isclose(df["return_period"], 10.0)][["dataset", "return_level"]].copy()
@@ -74,11 +56,20 @@ def plot_location(location, datasets):
         ),
     )
 
-    fig, axes = plt.subplots(1, len(RETURN_PERIODS), figsize=(16, 4.5), sharey=True)
-    width = 0.38
+    fig_width = max(10, 2.2 * len(ordered_datasets) + 4)
+    fig, axes = plt.subplots(1, len(RETURN_PERIODS), figsize=(fig_width, 5.2), sharey=True)
+    if len(RETURN_PERIODS) == 1:
+        axes = [axes]
+
+    cmap = plt.get_cmap("tab10")
+    dataset_colors = {d: cmap(i % 10) for i, d in enumerate(ordered_datasets)}
+
+    n = len(ordered_datasets)
+    group_gap = 0.6
+    x_gev = np.arange(n, dtype=float)
+    x_gpd = x_gev + n + group_gap
 
     for ax, rp in zip(axes, RETURN_PERIODS):
-        labels = []
         gev_vals, gev_err_lo, gev_err_hi = [], [], []
         gpd_vals, gpd_err_lo, gpd_err_hi = [], [], []
 
@@ -93,11 +84,6 @@ def plot_location(location, datasets):
                 & (df["dataset"] == d)
                 & (np.isclose(df["return_period"], rp))
             ]
-
-            if row_gev.empty and row_gpd.empty:
-                continue
-
-            labels.append(dataset_label(d))
 
             if row_gev.empty:
                 gev_vals.append(np.nan)
@@ -125,58 +111,118 @@ def plot_location(location, datasets):
                 gpd_err_lo.append(rl - lo)
                 gpd_err_hi.append(hi - rl)
 
-        if not labels:
+        max_top = 0.0
+
+        for i, d in enumerate(ordered_datasets):
+            color = dataset_colors[d]
+
+            if np.isfinite(gev_vals[i]):
+                ax.bar(x_gev[i], gev_vals[i], width=0.8, color=color)
+                ax.errorbar(
+                    [x_gev[i]],
+                    [gev_vals[i]],
+                    yerr=[[gev_err_lo[i]], [gev_err_hi[i]]],
+                    fmt="none",
+                    capsize=3,
+                    color="k",
+                    linewidth=1,
+                )
+                max_top = max(max_top, gev_vals[i] + gev_err_hi[i])
+
+            if np.isfinite(gpd_vals[i]):
+                ax.bar(x_gpd[i], gpd_vals[i], width=0.8, color=color)
+                ax.errorbar(
+                    [x_gpd[i]],
+                    [gpd_vals[i]],
+                    yerr=[[gpd_err_lo[i]], [gpd_err_hi[i]]],
+                    fmt="none",
+                    capsize=3,
+                    color="k",
+                    linewidth=1,
+                )
+                max_top = max(max_top, gpd_vals[i] + gpd_err_hi[i])
+
+        if max_top == 0:
             ax.set_title(f"{int(rp)}-year")
             ax.grid(axis="y", alpha=0.3)
             continue
 
-        x = np.arange(len(labels), dtype=float)
-        x_gev = x - width / 2
-        x_gpd = x + width / 2
+        top_pad = max(0.5, 0.08 * max_top)
+        ax.set_ylim(0, max_top + 2.2 * top_pad)
 
-        ax.bar(x_gev, gev_vals, width=width, label="GEV", color="#4C78A8")
-        ax.errorbar(
-            x_gev,
-            gev_vals,
-            yerr=[gev_err_lo, gev_err_hi],
-            fmt="none",
-            capsize=3,
-            color="k",
-            linewidth=1,
-        )
+        # Subtle background split between GEV and GPD sections.
+        gev_left = x_gev[0] - 0.5
+        gev_right = x_gev[-1] + 0.5
+        gpd_left = x_gpd[0] - 0.5
+        gpd_right = x_gpd[-1] + 0.5
+        gev_bg = "#eaf3ff"
+        gpd_bg = "#fdecec"
+        ax.axvspan(gev_left, gev_right, color=gev_bg, zorder=0)
+        ax.axvspan(gpd_left, gpd_right, color=gpd_bg, zorder=0)
 
-        ax.bar(x_gpd, gpd_vals, width=width, label="GPD", color="#F58518")
-        ax.errorbar(
-            x_gpd,
-            gpd_vals,
-            yerr=[gpd_err_lo, gpd_err_hi],
-            fmt="none",
-            capsize=3,
-            color="k",
-            linewidth=1,
-        )
+        for i in range(n):
+            if np.isfinite(gev_vals[i]):
+                ci_width = gev_err_lo[i] + gev_err_hi[i]
+                ax.text(
+                    x_gev[i],
+                    gev_vals[i] + gev_err_hi[i] + 0.45 * top_pad,
+                    f"{gev_vals[i]:.2f}\n({ci_width:.2f})",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
 
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=30, ha="right")
+            if np.isfinite(gpd_vals[i]):
+                ci_width = gpd_err_lo[i] + gpd_err_hi[i]
+                ax.text(
+                    x_gpd[i],
+                    gpd_vals[i] + gpd_err_hi[i] + 0.45 * top_pad,
+                    f"{gpd_vals[i]:.2f}\n({ci_width:.2f})",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+
+        xticks = np.concatenate([x_gev, x_gpd])
+        xticklabels = [dataset_label(d) for d in ordered_datasets] + [dataset_label(d) for d in ordered_datasets]
+        ax.set_xticks(xticks)
+        ax.set_xticklabels(xticklabels, rotation=30, ha="right")
+
+        sep_x = (x_gev[-1] + x_gpd[0]) / 2
+        ax.axvline(sep_x, color="gray", linestyle="--", linewidth=0.8, alpha=0.7)
+
         ax.set_title(f"{int(rp)}-year")
         ax.grid(axis="y", alpha=0.3)
 
     axes[0].set_ylabel("Return level Hs (m)")
-    handles, labels = axes[0].get_legend_handles_labels()
-    if handles:
-        fig.legend(
-            handles,
-            labels,
-            loc="upper center",
-            bbox_to_anchor=(0.5, 0.955),
-            ncol=2,
-            frameon=False,
-        )
-    fig.suptitle(f"{location} — return levels ({group_tag})", y=0.995)
 
-    out_path = RESULT_DIR / location / f"{location}_gev_gpd_return_level_bars.png"
+    bg_handles = [
+        Patch(facecolor="#eaf3ff", edgecolor="none", label="GEV"),
+        Patch(facecolor="#fdecec", edgecolor="none", label="GPD"),
+    ]
+    fig.legend(
+        handles=bg_handles,
+        loc="upper center",
+        ncol=2,
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.955),
+    )
+
+    non_raw = [d for d in ordered_datasets if d != "raw"]
+    if any(d.startswith("transfer_") for d in non_raw):
+        correction_label = " — transfer bias correction"
+    elif any(d.startswith("local_") for d in non_raw):
+        correction_label = " — local bias correction"
+    else:
+        correction_label = ""
+    fig.suptitle(f"{location}{correction_label} — return levels", y=0.98)
+
+    if output_name:
+        out_path = RESULT_DIR / location / output_name
+    else:
+        out_path = RESULT_DIR / location / f"{location}_gev_gpd_return_level_bars.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.tight_layout(rect=(0, 0, 1, 0.86))
+    plt.tight_layout(rect=(0, 0, 1, 0.95))
     plt.savefig(out_path, dpi=300)
     plt.close()
 
@@ -187,9 +233,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--location", required=True)
     parser.add_argument("--datasets", nargs="+", required=True)
+    parser.add_argument(
+        "--output-name",
+        default=None,
+        help="Custom output filename (e.g., custom_name.png). If not provided, defaults to <location>_gev_gpd_return_level_bars.png",
+    )
     args = parser.parse_args()
 
-    plot_location(args.location, args.datasets)
+    plot_location(args.location, args.datasets, output_name=args.output_name)
 
 
 if __name__ == "__main__":

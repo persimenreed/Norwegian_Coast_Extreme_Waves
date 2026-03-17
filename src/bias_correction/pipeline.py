@@ -13,7 +13,6 @@ from src.settings import (
 from src.bias_correction.data import (
     load_pairs,
     load_hindcast,
-    load_pooled_pairs,
 )
 
 from src.bias_correction.registry import get_method
@@ -28,6 +27,26 @@ def _save_df(df, path_str):
     _ensure_parent(path_str)
     df.to_csv(path_str, index=False)
     return path_str
+
+
+def _save_feature_importance(location, name, model):
+    if not isinstance(model, dict):
+        return None
+
+    importance = model.get("feature_importance")
+    if importance is None:
+        return None
+
+    if name != "feature_importance_local_xgboost":
+        return None
+
+    if location not in set(get_core_buoy_locations()):
+        return None
+
+    path = Path("results") / "bias_correction" / location / f"{name}.csv"
+    _ensure_parent(str(path))
+    importance.to_csv(path, index=False)
+    return str(path)
 
 
 def _selected_methods(method=None):
@@ -60,9 +79,19 @@ def _validation_subset_to_output(df_base, df_corrected, method_name, meta):
     return out
 
 
-def _fit_apply_save(method_name, df_train, df_hind, location, prefix):
+def _fit_kwargs(method_name, settings_name=None):
+    if method_name in {"xgboost", "transformer"}:
+        if not settings_name:
+            raise ValueError(
+                f"settings_name must be provided for bias-correction method '{method_name}'."
+            )
+        return {"settings_name": settings_name}
+    return {}
+
+
+def _fit_apply_save(method_name, df_train, df_hind, location, prefix, settings_name=None):
     method = get_method(method_name)
-    model = method.fit(df_train)
+    model = method.fit(df_train, **_fit_kwargs(method_name, settings_name=settings_name))
     df_pred = method.apply(df_hind.copy(), model)
 
     out_path = format_path(
@@ -71,12 +100,21 @@ def _fit_apply_save(method_name, df_train, df_hind, location, prefix):
         corr_method=f"{prefix}{method_name}",
     )
     _save_df(df_pred, out_path)
+    _save_feature_importance(location, f"feature_importance_{prefix}{method_name}", model)
     return out_path
 
 
-def _fit_apply_validation(method_name, df_train, df_valid, location, prefix, meta):
+def _fit_apply_validation(
+    method_name,
+    df_train,
+    df_valid,
+    location,
+    prefix,
+    meta,
+    settings_name=None,
+):
     method = get_method(method_name)
-    model = method.fit(df_train)
+    model = method.fit(df_train, **_fit_kwargs(method_name, settings_name=settings_name))
     df_pred = method.apply(df_valid.copy(), model)
 
     out = _validation_subset_to_output(
@@ -92,12 +130,22 @@ def _fit_apply_validation(method_name, df_train, df_valid, location, prefix, met
         corr_method=f"{prefix}{method_name}",
     )
     _save_df(out, out_path)
+    _save_feature_importance(
+        location,
+        f"feature_importance_validation_{prefix}{method_name}",
+        model,
+    )
     return out_path
 
 
 def _run_local_cv(location, df_pairs, df_hind, saved, methods):
     for name in methods:
         method = get_method(name)
+        settings_name = (
+            f"{name}_{location}"
+            if location in get_buoy_locations() and name in {"xgboost", "transformer"}
+            else None
+        )
 
         oof_parts = []
         used_folds = 0
@@ -106,7 +154,10 @@ def _run_local_cv(location, df_pairs, df_hind, saved, methods):
             df_train = df_pairs.iloc[split["train_idx"]].copy()
             df_test = df_pairs.iloc[split["test_idx"]].copy()
 
-            model = method.fit(df_train)
+            model = method.fit(
+                df_train,
+                **_fit_kwargs(name, settings_name=settings_name),
+            )
             df_pred = method.apply(df_test.copy(), model)
 
             out = _validation_subset_to_output(
@@ -142,6 +193,7 @@ def _run_local_cv(location, df_pairs, df_hind, saved, methods):
             df_hind=df_hind,
             location=location,
             prefix="local_",
+            settings_name=settings_name,
         )
         saved[f"local_{name}"] = corr_path
 
@@ -160,6 +212,7 @@ def _run_transfer(location, df_hind, df_pairs_target_or_none, saved, methods):
 
         for name in methods:
             prefix = f"transfer_{source}_"
+            settings_name = f"{name}_{source}" if name in {"xgboost", "transformer"} else None
 
             corr_path = _fit_apply_save(
                 method_name=name,
@@ -167,6 +220,7 @@ def _run_transfer(location, df_hind, df_pairs_target_or_none, saved, methods):
                 df_hind=df_hind,
                 location=location,
                 prefix=prefix,
+                settings_name=settings_name,
             )
             saved[f"{prefix}{name}"] = corr_path
 
@@ -184,42 +238,9 @@ def _run_transfer(location, df_hind, df_pairs_target_or_none, saved, methods):
                         "train_source": source,
                         "apply_target": location,
                     },
+                    settings_name=settings_name,
                 )
                 saved[f"validation_{prefix}{name}"] = val_path
-
-
-def _run_pooled(location, df_hind, df_pairs_target_or_none, saved, methods):
-    df_train = load_pooled_pairs(exclude_locations=[], include_only_core=True)
-
-    for name in methods:
-        prefix = "pooled_"
-
-        corr_path = _fit_apply_save(
-            method_name=name,
-            df_train=df_train,
-            df_hind=df_hind,
-            location=location,
-            prefix=prefix,
-        )
-        saved[f"{prefix}{name}"] = corr_path
-
-        if df_pairs_target_or_none is not None:
-            val_path = _fit_apply_validation(
-                method_name=name,
-                df_train=df_train,
-                df_valid=df_pairs_target_or_none,
-                location=location,
-                prefix=prefix,
-                meta={
-                    "validation_type": "external_pooled_validation",
-                    "fold": -1,
-                    "test_groups": "",
-                    "train_source": "core_buoys_pooled",
-                    "apply_target": location,
-                },
-            )
-            saved[f"validation_{prefix}{name}"] = val_path
-
 
 def run_bias_correction(location, method=None):
     core_buoys = set(get_core_buoy_locations())
@@ -247,15 +268,9 @@ def run_bias_correction(location, method=None):
         print(f"Running TRANSFER correction for external validation buoy {location}")
         _run_transfer(location, df_hind, df_pairs_target, saved, methods)
 
-        print(f"Running POOLED correction for external validation buoy {location}")
-        _run_pooled(location, df_hind, df_pairs_target, saved, methods)
-
     elif location in study_areas:
         print(f"Running TRANSFER correction for study area {location}")
         _run_transfer(location, df_hind, None, saved, methods)
-
-        print(f"Running POOLED correction for study area {location}")
-        _run_pooled(location, df_hind, None, saved, methods)
 
     else:
         raise ValueError(f"Unknown location role for '{location}'.")

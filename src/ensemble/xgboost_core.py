@@ -110,8 +110,8 @@ def _build_targets(df, methods):
     return valid, winners, obs
 
 
-def _common_xgb_params():
-    cfg = get_method_settings("ensemble_xgboost")
+def _common_xgb_params(settings_name="ensemble_xgboost"):
+    cfg = get_method_settings(settings_name) or get_method_settings("ensemble_xgboost")
     return {
         "n_estimators": int(cfg.get("n_estimators", 300)),
         "max_depth": int(cfg.get("max_depth", 4)),
@@ -180,9 +180,14 @@ def _predict_gate(df, bundle, return_weights=False):
     return pred
 
 
-def fit_state_corrected_ensemble(df, methods, state_features=None):
+def fit_state_corrected_ensemble(
+    df,
+    methods,
+    state_features=None,
+    settings_name="ensemble_xgboost",
+):
     try:
-        from xgboost import XGBClassifier, XGBRegressor
+        from xgboost import XGBClassifier
     except ImportError as exc:
         raise ImportError(
             "XGBoost is not installed in the active environment."
@@ -225,7 +230,7 @@ def fit_state_corrected_ensemble(df, methods, state_features=None):
         gate_model = XGBClassifier(
             objective=objective,
             eval_metric=eval_metric,
-            **_common_xgb_params(),
+            **_common_xgb_params(settings_name=settings_name),
         )
 
         label_map = {cls: idx for idx, cls in enumerate(present_classes)}
@@ -247,59 +252,12 @@ def fit_state_corrected_ensemble(df, methods, state_features=None):
             reverse=True,
         )[:10]
 
-    blended_train = _predict_gate(df.iloc[valid_mask].copy().reset_index(drop=True), bundle)
-    residual_target = obs[valid_mask] - blended_train
-
-    if len(residual_target) < 50:
-        return bundle
-
-    X_resid, residual_fill, residual_feature_names = _feature_frame(
-        df.iloc[valid_mask].copy().reset_index(drop=True),
-        methods,
-        state_features=state_feature_names,
-        blended_prediction=blended_train,
-    )
-
-    residual_model = XGBRegressor(
-        objective="reg:squarederror",
-        eval_metric="rmse",
-        **_common_xgb_params(),
-    )
-    residual_model.fit(
-        X_resid,
-        residual_target,
-        sample_weight=_sample_weights(obs[valid_mask]),
-        verbose=False,
-    )
-
-    bundle["residual_model"] = residual_model
-    bundle["residual_fill"] = residual_fill
-    bundle["residual_feature_names"] = residual_feature_names
-    bundle["top_features"]["residual"] = sorted(
-        zip(residual_feature_names, residual_model.feature_importances_.tolist()),
-        key=lambda item: item[1],
-        reverse=True,
-    )[:10]
-
     return bundle
 
 
 def predict_state_corrected_ensemble(df, bundle, return_weights=False):
     blended, normalized = _predict_gate(df, bundle, return_weights=True)
-
-    residual = np.zeros(len(df), dtype=float)
-    if "residual_model" in bundle:
-        X_resid, _, _ = _feature_frame(
-            df,
-            bundle["methods"],
-            state_features=bundle["state_feature_names"],
-            fill=bundle["residual_fill"],
-            blended_prediction=blended,
-        )
-        residual = np.asarray(bundle["residual_model"].predict(X_resid), dtype=float)
-        residual[~np.isfinite(residual)] = 0.0
-
-    pred = clip_nonnegative(blended + residual)
+    pred = clip_nonnegative(blended)
 
     if return_weights:
         return pred, normalized
