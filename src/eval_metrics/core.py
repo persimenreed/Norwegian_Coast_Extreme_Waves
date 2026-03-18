@@ -85,6 +85,20 @@ def tail_rmse(model, obs, q):
     return rmse(model[mask], obs[mask])
 
 
+def tail_bias(model, obs, q):
+    model, obs = _clean(model, obs)
+    if len(obs) < 20:
+        return np.nan
+
+    thr = np.nanquantile(obs, q)
+    mask = obs >= thr
+
+    if np.sum(mask) < 20:
+        return np.nan
+
+    return bias(model[mask], obs[mask])
+
+
 def q_bias(model, obs, q):
     model, obs = _clean(model, obs)
     if len(obs) < 20:
@@ -124,6 +138,11 @@ def compute_metrics(name, model, obs):
 
         "tail_rmse_95": tail_rmse(model, obs, 0.95),
         "tail_rmse_99": tail_rmse(model, obs, 0.99),
+
+        "tail_bias_q50": tail_bias(model, obs, 0.50),
+        "tail_bias_q75": tail_bias(model, obs, 0.75),
+        "tail_bias_q95": tail_bias(model, obs, 0.95),
+        "tail_bias_q995": tail_bias(model, obs, 0.995),
 
         "twrmse": twrmse(model, obs),
 

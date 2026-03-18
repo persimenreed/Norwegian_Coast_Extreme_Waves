@@ -103,7 +103,11 @@ def _target_member_specs(location, methods, source=None, combined=False, require
     if source is None:
         raise ValueError("source must be provided for a single-source ensemble.")
 
-    member_specs = build_member_specs([f"transfer_{source}"], methods)
+    member_family = "localcv" if require_validation else "local"
+    if source != location:
+        member_family = f"transfer_{source}"
+
+    member_specs = build_member_specs([member_family], methods)
     exists = (
         has_validation_member_specs(location, member_specs)
         if require_validation
@@ -173,7 +177,9 @@ def run(
         if source is None:
             raise ValueError("source must be provided when combined=False.")
         training_specs = _single_source_training_specs(source, methods)
-        apply_member_family = f"transfer_{source}"
+        apply_member_family = (
+            "local" if location is not None and source == location else f"transfer_{source}"
+        )
         output_name = output_name or f"ensemble_{source}"
 
     target_locations = unique_locations(
@@ -222,6 +228,7 @@ def run(
         input_families = unique_locations(
             [spec["member_family"] for spec in hindcast_member_specs]
         )
+        member_family_label = "|".join(input_families)
         contributions.setdefault(target_location, {})["input_families"] = input_families
 
         validation_member_specs = _target_member_specs(
@@ -242,7 +249,7 @@ def run(
                 prediction=pred,
                 output_name=output_name,
                 train_locations=training_labels,
-                member_family=apply_member_family,
+                member_family=member_family_label,
                 member_families=input_families,
                 methods=training_members,
                 validation_type="ensemble_oof",
@@ -263,7 +270,7 @@ def run(
                 prediction=pred,
                 output_name=output_name,
                 train_locations=training_labels,
-                member_family=apply_member_family,
+                member_family=member_family_label,
                 member_families=input_families,
                 methods=training_members,
                 validation_type="ensemble_external_apply",

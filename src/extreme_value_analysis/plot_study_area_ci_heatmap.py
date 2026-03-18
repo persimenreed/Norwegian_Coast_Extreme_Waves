@@ -148,11 +148,16 @@ def plot_heatmap(locations, model, datasets=None):
 def plot_buoy_model_heatmap(location: str, family_prefix: str):
     df = load_rows(location, models=MODELS)
     keep = discover_datasets([location], MODELS, family_prefix)
+    available = set(df["dataset"].dropna().astype(str))
+
+    if family_prefix == "local":
+        ensemble_local = f"ensemble_{location}"
+        if ensemble_local in available:
+            keep = keep + [ensemble_local]
 
     if family_prefix == "transfer":
         opposite = opposite_buoy_location(location)
         ensemble_opposite = f"ensemble_{opposite}" if opposite else None
-        available = set(df["dataset"].dropna().astype(str))
         if ensemble_opposite and ensemble_opposite in available:
             keep = keep + [ensemble_opposite]
 
@@ -257,6 +262,59 @@ def plot_vestfjorden_gev_gpd_heatmap():
     print(f"Saved {out_path}")
 
 
+def plot_buoy_ensemble_gev_gpd_heatmap(location: str):
+    """Plot combined GEV/GPD heatmap for a buoy with raw + two ensemble locations."""
+    df = load_rows(location, models=MODELS)
+
+    keep_datasets = [
+        "raw",
+        "ensemble_fauskane",
+        "ensemble_fedjeosen",
+    ]
+
+    df = df[df["dataset"].isin(keep_datasets)].copy()
+
+    if df.empty:
+        print(f"Skipped {location} ensemble: no matching ensemble datasets")
+        return
+
+    pivot = df.pivot_table(index="dataset", columns="model", values="ci_width", aggfunc="first")
+    pivot = pivot.reindex(index=sorted(pivot.index, key=dataset_sort_key))
+    pivot = pivot.reindex(columns=MODELS)
+
+    if "GEV" in pivot.columns:
+        pivot = pivot.sort_values(by="GEV", ascending=True, na_position="last", kind="mergesort")
+
+    vals = pivot.values.astype(float)
+
+    fig, ax = plt.subplots(figsize=(1.4 * len(pivot.columns) + 2.5, 0.45 * len(pivot.index) + 2.5))
+    im = ax.imshow(vals, aspect="auto")
+
+    ax.set_xticks(np.arange(len(pivot.columns)))
+    ax.set_xticklabels(pivot.columns, rotation=0, ha="center")
+    ax.set_yticks(np.arange(len(pivot.index)))
+    ax.set_yticklabels([dataset_label(x) for x in pivot.index])
+
+    norm = im.norm
+    for i in range(vals.shape[0]):
+        for j in range(vals.shape[1]):
+            v = vals[i, j]
+            txt = "nan" if not np.isfinite(v) else f"{v:.2f}"
+            color = "black" if np.isfinite(v) and norm(v) > 0.5 else "white"
+            ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
+
+    ax.set_title(f"{location} ensemble 50-year CI width")
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("CI width (m)")
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    out_path = OUT / f"{location}_CI_50yr_ensemble.png"
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300)
+    plt.close()
+    print(f"Saved {out_path}")
+
+
 def main():
     # 1) Study-area heatmaps for fixed study locations, one figure per model.
     plot_heatmap(STUDY_LOCATIONS, "GEV", datasets=STUDY_DATASETS_DEFAULT)
@@ -269,6 +327,10 @@ def main():
 
     # 3) Vestfjorden combined GEV/GPD heatmap if available.
     plot_vestfjorden_gev_gpd_heatmap()
+
+    # 4) Buoy combined GEV/GPD ensemble heatmaps (without ensemble_combined).
+    for location in BUOY_LOCATIONS:
+        plot_buoy_ensemble_gev_gpd_heatmap(location)
 
 
 if __name__ == "__main__":

@@ -55,15 +55,25 @@ def _ensemble_jobs_for_location(location):
     study_areas = set(get_study_area_locations())
 
     if location in core_buoys:
-        return [
+        jobs = [
             {
-                "source": source,
+                "source": location,
                 "combined": False,
-                "output_name": f"ensemble_{source}",
+                "output_name": f"ensemble_{location}",
             }
-            for source in core_buoys
-            if source != location
         ]
+        jobs.extend(
+            [
+                {
+                    "source": source,
+                    "combined": False,
+                    "output_name": f"ensemble_{source}",
+                }
+                for source in core_buoys
+                if source != location
+            ]
+        )
+        return jobs
 
     if location in external_buoys or location in study_areas:
         jobs = [

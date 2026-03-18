@@ -50,6 +50,11 @@ def plot(location, periods, group_name, prefix=None, fixed_datasets=None):
         if opposite:
             transfer_mask = transfer_mask | (df["dataset"] == f"ensemble_{opposite}")
         df = df[transfer_mask]
+    elif group_name == "local":
+        ensemble_local = f"ensemble_{location}"
+        local_mask = df["dataset"].astype(str).str.startswith(prefix)
+        local_mask = local_mask | (df["dataset"] == ensemble_local)
+        df = df[local_mask]
     else:
         df = df[df["dataset"].astype(str).str.startswith(prefix)]
 
@@ -226,7 +231,7 @@ def plot(location, periods, group_name, prefix=None, fixed_datasets=None):
     if group_name == "transfer":
         top_margin = 0.76
     elif group_name == "local":
-        top_margin = 0.80
+        top_margin = 0.76
     else:
         top_margin = 0.84
     plt.tight_layout(rect=(0, 0, 1, top_margin))

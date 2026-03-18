@@ -34,6 +34,15 @@ VESTFJORDEN_EXTENDED_METRICS = [
     "quantile_score_99",
 ]
 
+RAW_BIAS_SUMMARY_LOCATIONS = ["fedjeosen", "fauskane", "vestfjorden"]
+RAW_BIAS_SUMMARY_METRICS = [
+    "bias",
+    "tail_bias_q50",
+    "tail_bias_q75",
+    "tail_bias_q95",
+    "tail_bias_q995",
+]
+
 
 def load_metrics(location: str) -> pd.DataFrame:
     path = ROOT / location / "metrics.csv"
@@ -101,7 +110,8 @@ def _plot_single_heatmap(location: str, plot_df: pd.DataFrame, suffix: str):
     im = ax.imshow(vals, aspect="auto")
 
     ax.set_xticks(np.arange(len(plot_df.columns)))
-    ax.set_xticklabels(plot_df.columns, rotation=30, ha="right")
+    display_cols = [c.replace("tail_bias_", "bias_") for c in plot_df.columns]
+    ax.set_xticklabels(display_cols, rotation=30, ha="right")
     ax.set_yticks(np.arange(len(plot_df.index)))
     ax.set_yticklabels(plot_df.index)
 
@@ -186,6 +196,68 @@ def _plot_vestfjorden_raw_vs_named_ensembles(df: pd.DataFrame, metrics):
     _plot_single_heatmap("vestfjorden", plot_df, "raw_vs_ensemble_locations")
 
 
+def _plot_raw_bias_summary_heatmap():
+    rows = []
+
+    for location in RAW_BIAS_SUMMARY_LOCATIONS:
+        try:
+            df = load_metrics(location)
+        except FileNotFoundError:
+            row = {"location": location}
+            for metric in RAW_BIAS_SUMMARY_METRICS:
+                row[metric] = np.nan
+            rows.append(row)
+            continue
+
+        raw = df[df["method"] == "raw"]
+        row = {"location": location}
+
+        if raw.empty:
+            for metric in RAW_BIAS_SUMMARY_METRICS:
+                row[metric] = np.nan
+        else:
+            raw_row = raw.iloc[0]
+            for metric in RAW_BIAS_SUMMARY_METRICS:
+                row[metric] = float(raw_row[metric]) if metric in raw_row else np.nan
+
+        rows.append(row)
+
+    plot_df = pd.DataFrame(rows).set_index("location")
+    plot_df = plot_df.reindex(index=RAW_BIAS_SUMMARY_LOCATIONS, columns=RAW_BIAS_SUMMARY_METRICS)
+
+    vals = plot_df.values.astype(float)
+
+    fig, ax = plt.subplots(
+        figsize=(1.4 * len(plot_df.columns) + 2, 0.45 * len(plot_df.index) + 2.5)
+    )
+    im = ax.imshow(vals, aspect="auto")
+
+    ax.set_xticks(np.arange(len(plot_df.columns)))
+    ax.set_xticklabels(plot_df.columns, rotation=30, ha="right")
+    ax.set_yticks(np.arange(len(plot_df.index)))
+    ax.set_yticklabels(plot_df.index)
+
+    norm = im.norm
+    for i in range(vals.shape[0]):
+        for j in range(vals.shape[1]):
+            v = vals[i, j]
+            txt = "nan" if not np.isfinite(v) else f"{v:.3f}"
+            color = "black" if np.isfinite(v) and norm(v) > 0.5 else "white"
+            ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
+
+    ax.set_title("Raw bias summary")
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Metric value")
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    path = OUT / "raw_bias_summary_heatmap.png"
+    plt.tight_layout()
+    plt.savefig(path, dpi=300)
+    plt.close()
+
+    print(f"Saved {path}")
+
+
 def _build_groups(df, location):
     """
     Build plotting groups depending on which methods exist.
@@ -205,6 +277,9 @@ def _build_groups(df, location):
 
     if localcv:
         groups["localcv"] = ["raw"] + localcv
+        ensemble_local = f"ensemble_{location}"
+        if ensemble_local in methods:
+            groups["localcv"].append(ensemble_local)
 
     if transfer:
         groups["transfer"] = ["raw"] + transfer
@@ -243,23 +318,21 @@ def plot_heatmap(location: str, metrics=None):
 
         _plot_single_heatmap(location, plot_df, suffix)
 
-    # Additional compact transfer-style comparison:
-    # raw vs opposite-location ensemble for buoy locations.
+    # Additional ensemble-only comparison for buoy locations:
+    # raw vs ensemble_fauskane vs ensemble_fedjeosen.
     if location in {"fauskane", "fedjeosen"}:
-        opposite = _opposite_location(location)
-        ensemble_opposite = f"ensemble_{opposite}" if opposite else None
-        if ensemble_opposite:
-            keep = ["raw", ensemble_opposite]
-            sub = df[df["method"].isin(keep)].copy()
-            if not sub.empty and sub["method"].nunique() == 2:
-                sub = sub.sort_values("tail_rmse_99", ascending=True)
-                plot_df = sub.set_index("method")[metrics].copy()
+        keep = ["raw", "ensemble_fauskane", "ensemble_fedjeosen"]
+        keep = sorted(set(keep), key=_method_sort_key)
+        sub = df[df["method"].isin(keep)].copy()
+        if not sub.empty and sub["method"].nunique() >= 2:
+            sub = sub.sort_values("tail_rmse_99", ascending=True)
+            plot_df = sub.set_index("method")[metrics].copy()
 
-                for col in ["q95_bias", "q99_bias"]:
-                    if col in plot_df.columns:
-                        plot_df[col] = plot_df[col].abs()
+            for col in ["q95_bias", "q99_bias"]:
+                if col in plot_df.columns:
+                    plot_df[col] = plot_df[col].abs()
 
-                _plot_single_heatmap(location, plot_df, "transfer_raw_vs_ensemble")
+            _plot_single_heatmap(location, plot_df, "ensemble")
 
     if location == "vestfjorden":
         _plot_vestfjorden_raw_vs_named_ensembles(df, metrics)
@@ -359,6 +432,9 @@ def plot_improvement_vs_raw(location: str):
 
     # Local-only improvement.
     local_methods = {m for m in df["method"].tolist() if m.startswith("localcv_")}
+    ensemble_local = f"ensemble_{location}"
+    if ensemble_local in df["method"].values:
+        local_methods.add(ensemble_local)
     imp_local = _build_improvement_table(df, local_methods)
     _plot_improvement(imp_local, location, "local", "Local improvement")
 
@@ -398,6 +474,8 @@ def main():
 
         plot_heatmap(loc)
         plot_improvement_vs_raw(loc)
+
+    _plot_raw_bias_summary_heatmap()
 
 
 if __name__ == "__main__":

@@ -40,7 +40,14 @@ def dataset_label(d):
 def plot_location(location, datasets, output_name=None):
     df = load_summary(location)
 
-    # Keep one stable dataset order based on the lowest available 10-year RL across models.
+    # Keep a preferred order for key ensemble comparisons, then stable fallback order.
+    preferred_rank = {
+        "raw": 0,
+        "ensemble_fedjeosen": 1,
+        "ensemble_fauskane": 2,
+    }
+
+    # Stable fallback order based on the lowest available 10-year RL across models.
     rp10 = df[np.isclose(df["return_period"], 10.0)][["dataset", "return_level"]].copy()
     rp10_map = (
         rp10.groupby("dataset", as_index=True)["return_level"]
@@ -50,13 +57,14 @@ def plot_location(location, datasets, output_name=None):
     ordered_datasets = sorted(
         datasets,
         key=lambda d: (
+            preferred_rank.get(d, 99),
             d not in rp10_map,
             rp10_map.get(d, float("inf")),
             d,
         ),
     )
 
-    fig_width = max(10, 2.2 * len(ordered_datasets) + 4)
+    fig_width = max(11, 2.5 * len(ordered_datasets) + 4.5)
     fig, axes = plt.subplots(1, len(RETURN_PERIODS), figsize=(fig_width, 5.2), sharey=True)
     if len(RETURN_PERIODS) == 1:
         axes = [axes]
@@ -222,7 +230,7 @@ def plot_location(location, datasets, output_name=None):
     else:
         out_path = RESULT_DIR / location / f"{location}_gev_gpd_return_level_bars.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.tight_layout(rect=(0, 0, 1, 0.95))
+    plt.tight_layout(rect=(0, 0, 1, 0.95), w_pad=0.4)
     plt.savefig(out_path, dpi=300)
     plt.close()
 

@@ -59,7 +59,7 @@ def _ensemble_output_names(location: str):
     study_areas = set(get_study_area_locations())
 
     if location in core_buoys:
-        return [f"ensemble_{source}" for source in core_buoys if source != location]
+        return [f"ensemble_{source}" for source in core_buoys]
 
     if location in external_buoys or location in study_areas:
         names = [f"ensemble_{source}" for source in core_buoys]
