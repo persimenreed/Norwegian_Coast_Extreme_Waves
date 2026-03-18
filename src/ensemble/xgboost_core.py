@@ -129,6 +129,65 @@ def _common_xgb_params(settings_name="ensemble_xgboost"):
     }
 
 
+def _tail_aware_config(df, settings_name="ensemble_xgboost"):
+    cfg = get_method_settings(settings_name) or get_method_settings("ensemble_xgboost")
+
+    raw = pd.to_numeric(df.get(RAW_MODEL), errors="coerce").to_numpy(dtype=float)
+    valid = raw[np.isfinite(raw)]
+    if len(valid) < 50:
+        return {
+            "enabled": False,
+            "raw_q95": np.nan,
+            "raw_q99": np.nan,
+            "strength_q95": 0.0,
+            "strength_q99": 0.0,
+        }
+
+    return {
+        "enabled": bool(cfg.get("tail_aware", True)),
+        "raw_q95": float(np.nanquantile(valid, float(cfg.get("tail_q95", 0.95)))),
+        "raw_q99": float(np.nanquantile(valid, float(cfg.get("tail_q99", 0.99)))),
+        "strength_q95": float(cfg.get("tail_strength_q95", 0.20)),
+        "strength_q99": float(cfg.get("tail_strength_q99", 0.50)),
+    }
+
+
+def _apply_tail_aware_weighting(df, bundle, weights, members):
+    cfg = bundle.get("tail_aware")
+    if not cfg or not cfg.get("enabled", False):
+        return weights
+
+    raw = pd.to_numeric(df.get(RAW_MODEL), errors="coerce").to_numpy(dtype=float)
+    if raw.ndim != 1 or len(raw) != len(weights):
+        return weights
+
+    strength = np.zeros(len(raw), dtype=float)
+    q95 = float(cfg.get("raw_q95", np.nan))
+    q99 = float(cfg.get("raw_q99", np.nan))
+
+    if np.isfinite(q95):
+        strength[raw >= q95] = float(cfg.get("strength_q95", 0.0))
+    if np.isfinite(q99):
+        strength[raw >= q99] = float(cfg.get("strength_q99", 0.0))
+
+    if not np.any(strength > 0):
+        return weights
+
+    finite_members = np.isfinite(members)
+    safe_min = np.where(finite_members, members, np.inf)
+    safe_max = np.where(finite_members, members, -np.inf)
+    member_min = safe_min.min(axis=1, keepdims=True)
+    member_max = safe_max.max(axis=1, keepdims=True)
+    member_min[~np.isfinite(member_min)] = 0.0
+    member_max[~np.isfinite(member_max)] = 0.0
+    spread = np.maximum(member_max - member_min, 1e-6)
+    relative_level = np.clip((members - member_min) / spread, 0.0, 1.0)
+
+    factors = 1.0 + strength[:, None] * relative_level
+    adjusted = np.where(finite_members, weights * factors, 0.0)
+    return adjusted
+
+
 def _predict_gate(df, bundle, return_weights=False):
     methods = bundle["methods"]
     members = _member_matrix(df, methods)
@@ -155,6 +214,7 @@ def _predict_gate(df, bundle, return_weights=False):
 
     finite_members = np.isfinite(members)
     weights = np.where(finite_members, weights, 0.0)
+    weights = _apply_tail_aware_weighting(df, bundle, weights, members)
     row_sum = weights.sum(axis=1, keepdims=True)
     normalized = np.divide(
         weights,
@@ -214,6 +274,7 @@ def fit_state_corrected_ensemble(
         "state_feature_names": state_feature_names,
         "gate_fill": gate_fill,
         "gate_feature_names": gate_feature_names,
+        "tail_aware": _tail_aware_config(df, settings_name=settings_name),
         "class_counts": {
             methods[idx]: int(counts[idx])
             for idx in range(len(methods))

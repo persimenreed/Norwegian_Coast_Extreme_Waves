@@ -180,8 +180,14 @@ else:
 
 # ── data-loaders / prediction ────────────────────────────────────────────────
 
-def _loader(x, y, batch_size, shuffle, use_cuda, seed):
-    ds = TensorDataset(torch.from_numpy(x), torch.from_numpy(y))
+def _loader(x, y, batch_size, shuffle, use_cuda, seed, weights=None):
+    if weights is None:
+        weights = np.ones(len(y), dtype=np.float32)
+    ds = TensorDataset(
+        torch.from_numpy(x),
+        torch.from_numpy(y),
+        torch.from_numpy(np.asarray(weights, dtype=np.float32)),
+    )
     gen = torch.Generator()
     gen.manual_seed(seed)
     return DataLoader(
@@ -202,6 +208,30 @@ def _predict(model, x, batch_size, device):
                   .to(device, non_blocking=use_cuda).contiguous())
             parts.append(model(xb).cpu().numpy())
     return np.concatenate(parts).astype(np.float32) if parts else np.array([], dtype=np.float32)
+
+
+def _tail_sample_weights(values, cfg):
+    values = np.asarray(values, dtype=float)
+    weights = np.ones(len(values), dtype=np.float32)
+    valid = values[np.isfinite(values)]
+
+    if len(valid) < 20:
+        return weights
+
+    q90 = float(np.nanquantile(valid, float(cfg.get("tail_weight_q90_quantile", 0.90))))
+    q95 = float(np.nanquantile(valid, float(cfg.get("tail_weight_q95_quantile", 0.95))))
+    q99 = float(np.nanquantile(valid, float(cfg.get("tail_weight_q99_quantile", 0.99))))
+
+    weights[values >= q90] = np.float32(_cfg_float(cfg, "tail_weight_q90", 2.0))
+    weights[values >= q95] = np.float32(_cfg_float(cfg, "tail_weight_q95", 3.0))
+    weights[values >= q99] = np.float32(_cfg_float(cfg, "tail_weight_q99", 5.0))
+    return weights
+
+
+def _weighted_mean_loss(loss_values, sample_weights):
+    weighted = loss_values * sample_weights
+    denom = torch.clamp(sample_weights.sum(), min=1e-8)
+    return weighted.sum() / denom
 
 
 # ── public API ───────────────────────────────────────────────────────────────
@@ -266,16 +296,23 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
         m[positions] = True
         return m & valid
 
-    X_train, y_train, _ = _make_sequences(
+    obs_values = pd.to_numeric(work[HS_OBS], errors="coerce").to_numpy(np.float32)
+
+    X_train, y_train, train_end_idx = _make_sequences(
         X, y, seg, seq_len, _target_mask(train_pos)
     )
 
     if len(X_train) < min_train:
         raise ValueError("Too few full-window sequences for transformer training.")
 
-    X_val, y_val, _ = _make_sequences(
+    X_val, y_val, val_end_idx = _make_sequences(
         X, y, seg, seq_len, _target_mask(val_pos)
     )
+
+    train_obs = obs_values[train_end_idx]
+    val_obs = obs_values[val_end_idx] if len(val_end_idx) else np.zeros(0, dtype=np.float32)
+    train_weights = _tail_sample_weights(train_obs, cfg)
+    val_weights = _tail_sample_weights(val_obs, cfg) if len(val_obs) else np.zeros(0, dtype=np.float32)
 
     device = _resolve_device()
     use_cuda = device.type == "cuda"
@@ -301,7 +338,7 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
         weight_decay=_cfg_float(cfg, "weight_decay", 1e-4),
     )
 
-    loss_fn = nn.HuberLoss(delta=1.0)
+    loss_fn = nn.HuberLoss(delta=1.0, reduction="none")
     batch_size = _cfg_int(cfg, "batch_size", 64)
 
     train_dl = _loader(
@@ -311,6 +348,7 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
         shuffle=True,
         use_cuda=use_cuda,
         seed=seed,
+        weights=train_weights,
     )
 
     val_dl = (
@@ -321,6 +359,7 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
             shuffle=False,
             use_cuda=use_cuda,
             seed=seed,
+            weights=val_weights,
         )
         if len(X_val)
         else None
@@ -337,11 +376,12 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
 
         model.train()
 
-        for xb, yb in train_dl:
+        for xb, yb, wb in train_dl:
             xb = xb.to(device, non_blocking=use_cuda).contiguous()
             yb = yb.to(device, non_blocking=use_cuda)
+            wb = wb.to(device, non_blocking=use_cuda)
             optimizer.zero_grad(set_to_none=True)
-            loss = loss_fn(model(xb), yb)
+            loss = _weighted_mean_loss(loss_fn(model(xb), yb), wb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -352,11 +392,14 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
             with torch.no_grad():
                 vloss = np.mean(
                     [
-                        loss_fn(
-                            model(xb.to(device, non_blocking=use_cuda).contiguous()),
-                            yb.to(device, non_blocking=use_cuda),
+                        _weighted_mean_loss(
+                            loss_fn(
+                                model(xb.to(device, non_blocking=use_cuda).contiguous()),
+                                yb.to(device, non_blocking=use_cuda),
+                            ),
+                            wb.to(device, non_blocking=use_cuda),
                         ).item()
-                        for xb, yb in val_dl
+                        for xb, yb, wb in val_dl
                     ]
                 )
 
