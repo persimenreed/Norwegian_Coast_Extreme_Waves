@@ -11,7 +11,7 @@ ATM_BASE_URL = "https://thredds.met.no/thredds/dodsC/nora3_subset_atmos/atm_hour
 WAV_BASE_URL = "https://thredds.met.no/thredds/dodsC/nora3_subset_wave/wave_tser/"
 
 START_DATE = "1959-01-01"
-END_DATE   = "2025-10-01"
+END_DATE   = "1970-01-01"
 
 LAT_MIN = 57.932274
 LAT_MAX = 63.609142

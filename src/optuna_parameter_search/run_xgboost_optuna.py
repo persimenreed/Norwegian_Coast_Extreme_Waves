@@ -20,9 +20,22 @@ from src.settings import get_core_buoy_locations
 # Optuna objective
 # ------------------------------------------------------------
 
-def make_objective(source, settings_name):
+def make_objective(source, settings_name, target_transform):
 
     def objective(trial):
+
+        tail_weight_q90 = trial.suggest_categorical(
+            "tail_weight_q90",
+            [1.0, 1.5, 2.0, 2.5, 3.0],
+        )
+        tail_weight_q95 = tail_weight_q90 + trial.suggest_categorical(
+            "tail_weight_q95_extra",
+            [0.0, 0.5, 1.0, 2.0, 3.0],
+        )
+        tail_weight_q99 = tail_weight_q95 + trial.suggest_categorical(
+            "tail_weight_q99_extra",
+            [1.0, 2.0, 4.0, 6.0, 8.0],
+        )
 
         params = {
 
@@ -53,6 +66,14 @@ def make_objective(source, settings_name):
             "reg_lambda": trial.suggest_float(
                 "reg_lambda", 1e-4, 10.0, log=True
             ),
+
+            "target_transform": target_transform,
+            "target_eps": trial.suggest_categorical(
+                "target_eps", [1e-6, 1e-5, 1e-4, 1e-3]
+            ),
+            "tail_weight_q90": tail_weight_q90,
+            "tail_weight_q95": tail_weight_q95,
+            "tail_weight_q99": tail_weight_q99,
 
             "random_state": 1
         }
@@ -89,6 +110,15 @@ def main():
             "'fedjeosen' or 'fauskane'."
         ),
     )
+    parser.add_argument(
+        "--target-transform",
+        default="log_ratio",
+        choices=["log_ratio", "additive_residual"],
+        help=(
+            "Training target transform to optimize. "
+            "Use 'log_ratio' to align XGBoost with the tail-focused setup."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -121,7 +151,11 @@ def main():
     early_stop = EarlyStoppingCallback(patience=150)
 
     study.optimize(
-        make_objective(source=args.source, settings_name=settings_name),
+        make_objective(
+            source=args.source,
+            settings_name=settings_name,
+            target_transform=args.target_transform,
+        ),
         n_trials=args.trials,
         callbacks=[early_stop],
         show_progress_bar=True
@@ -132,6 +166,7 @@ def main():
     print("Params:", study.best_trial.params)
     print("Settings key:", settings_name)
     print("Source:", args.source)
+    print("Target transform:", args.target_transform)
 
 
 if __name__ == "__main__":

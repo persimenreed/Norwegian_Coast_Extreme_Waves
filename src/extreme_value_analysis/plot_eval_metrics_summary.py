@@ -175,13 +175,15 @@ def _plot_vestfjorden_raw_vs_ensemble_extensive(df: pd.DataFrame):
 
 def _plot_vestfjorden_raw_vs_named_ensembles(df: pd.DataFrame, metrics):
     methods = ["raw", "ensemble_fauskane", "ensemble_fedjeosen", "ensemble_combined"]
-    sub = df[df["method"].isin(methods)].copy()
+    keep = sorted(set(methods), key=_method_sort_key)
+    sub = df[df["method"].isin(keep)].copy()
     if sub.empty or sub["method"].nunique() < 2:
         return
 
-    ordered = [m for m in methods if m in sub["method"].values]
-    sub["method"] = pd.Categorical(sub["method"], categories=ordered, ordered=True)
-    sub = sub.sort_values("method")
+    if "tail_rmse_99" in sub.columns:
+        sub = sub.sort_values("tail_rmse_99", ascending=True)
+    else:
+        sub = sub.sort_values("method", key=lambda s: s.map(_method_sort_key))
 
     keep_metrics = [c for c in metrics if c in sub.columns]
     if not keep_metrics:
@@ -256,6 +258,88 @@ def _plot_raw_bias_summary_heatmap():
     plt.close()
 
     print(f"Saved {path}")
+
+
+def _plot_location_bias_by_method_heatmap(location: str):
+    try:
+        df = load_metrics(location)
+    except FileNotFoundError:
+        return
+
+    metrics = [m for m in RAW_BIAS_SUMMARY_METRICS if m in df.columns]
+    if not metrics:
+        return
+
+    methods = set(df["method"].astype(str).tolist())
+
+    local = ["raw"] + [m for m in methods if m.startswith("localcv_")]
+    transfer = ["raw"] + [m for m in methods if m.startswith("transfer_")]
+
+    if location in {"fauskane", "fedjeosen"}:
+        ensemble_local = f"ensemble_{location}"
+        opposite = _opposite_location(location)
+        ensemble_transfer = f"ensemble_{opposite}" if opposite else None
+
+        if ensemble_local in methods:
+            local.append(ensemble_local)
+        if ensemble_transfer and ensemble_transfer in methods:
+            transfer.append(ensemble_transfer)
+
+    if location == "vestfjorden":
+        transfer.extend([m for m in methods if m.startswith("ensemble_")])
+
+    if "ensemble_transfer" in methods:
+        transfer.append("ensemble_transfer")
+
+    groups = {
+        "local": sorted(set(local), key=_method_sort_key),
+        "transfer": sorted(set(transfer), key=_method_sort_key),
+    }
+
+    for suffix, keep in groups.items():
+        sub = df[df["method"].isin(keep)][["method"] + metrics].copy()
+        if sub.empty or sub["method"].nunique() < 2:
+            continue
+
+        if "tail_bias_q50" in sub.columns:
+            sub = sub.assign(_abs_tail_bias_q50=sub["tail_bias_q50"].abs())
+            sub = sub.sort_values("_abs_tail_bias_q50", ascending=True, na_position="last")
+            sub = sub.drop(columns=["_abs_tail_bias_q50"])
+        else:
+            sub = sub.sort_values("method", key=lambda s: s.map(_method_sort_key))
+
+        plot_df = sub.set_index("method")
+        vals = plot_df.values.astype(float)
+
+        fig, ax = plt.subplots(
+            figsize=(1.4 * len(plot_df.columns) + 2, 0.45 * len(plot_df.index) + 2.5)
+        )
+        im = ax.imshow(vals, aspect="auto")
+
+        ax.set_xticks(np.arange(len(plot_df.columns)))
+        ax.set_xticklabels(plot_df.columns, rotation=30, ha="right")
+        ax.set_yticks(np.arange(len(plot_df.index)))
+        ax.set_yticklabels(plot_df.index)
+
+        norm = im.norm
+        for i in range(vals.shape[0]):
+            for j in range(vals.shape[1]):
+                v = vals[i, j]
+                txt = "nan" if not np.isfinite(v) else f"{v:.3f}"
+                color = "black" if np.isfinite(v) and norm(v) > 0.5 else "white"
+                ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
+
+        ax.set_title(f"Bias metrics by method ({suffix}) - {location}")
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label("Metric value")
+
+        OUT.mkdir(parents=True, exist_ok=True)
+        path = OUT / f"{location}_raw_bias_by_method_heatmap_{suffix}.png"
+        plt.tight_layout()
+        plt.savefig(path, dpi=300)
+        plt.close()
+
+        print(f"Saved {path}")
 
 
 def _build_groups(df, location):
@@ -474,6 +558,7 @@ def main():
 
         plot_heatmap(loc)
         plot_improvement_vs_raw(loc)
+        _plot_location_bias_by_method_heatmap(loc)
 
     _plot_raw_bias_summary_heatmap()
 

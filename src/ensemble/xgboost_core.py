@@ -11,7 +11,8 @@ from src.ensemble.common import OBS, member_column
 from src.settings import get_method_settings
 
 
-def _sample_weights(obs):
+def _sample_weights(obs, settings_name="ensemble_xgboost"):
+    cfg = get_method_settings(settings_name) or get_method_settings("ensemble_xgboost")
     obs = np.asarray(obs, dtype=float)
     weights = np.ones(len(obs), dtype=float)
     valid = np.isfinite(obs)
@@ -19,12 +20,12 @@ def _sample_weights(obs):
     if np.sum(valid) < 20:
         return weights
 
-    q90 = np.nanquantile(obs[valid], 0.90)
-    q95 = np.nanquantile(obs[valid], 0.95)
-    q99 = np.nanquantile(obs[valid], 0.99)
-    weights[obs >= q90] = 2.0
-    weights[obs >= q95] = 3.0
-    weights[obs >= q99] = 4.0
+    q90 = np.nanquantile(obs[valid], float(cfg.get("tail_weight_q90_quantile", 0.90)))
+    q95 = np.nanquantile(obs[valid], float(cfg.get("tail_weight_q95_quantile", 0.95)))
+    q99 = np.nanquantile(obs[valid], float(cfg.get("tail_weight_q99_quantile", 0.99)))
+    weights[obs >= q90] = float(cfg.get("tail_weight_q90", 2.0))
+    weights[obs >= q95] = float(cfg.get("tail_weight_q95", 3.0))
+    weights[obs >= q99] = float(cfg.get("tail_weight_q99", 4.0))
     return weights
 
 
@@ -106,8 +107,24 @@ def _build_targets(df, methods):
 
     errors = np.abs(members[valid] - obs[valid, None])
     errors[~finite_members[valid]] = np.inf
-    winners = np.argmin(errors, axis=1).astype(int)
-    return valid, winners, obs
+
+    finite_errors = np.where(np.isfinite(errors), errors, np.nan)
+    row_scale = np.nanmedian(finite_errors, axis=1, keepdims=True)
+    row_scale[~np.isfinite(row_scale)] = 1.0
+    row_scale = np.maximum(row_scale, 1e-3)
+
+    scores = np.exp(-errors / row_scale)
+    scores[~np.isfinite(scores)] = 0.0
+    score_sum = scores.sum(axis=1, keepdims=True)
+    soft_targets = np.divide(
+        scores,
+        score_sum,
+        out=np.zeros_like(scores),
+        where=score_sum > 0,
+    )
+
+    dominant = np.argmax(soft_targets, axis=1).astype(int)
+    return valid, soft_targets, dominant, obs
 
 
 def _common_xgb_params(settings_name="ensemble_xgboost"):
@@ -193,7 +210,37 @@ def _predict_gate(df, bundle, return_weights=False):
     members = _member_matrix(df, methods)
     n_rows = len(df)
 
-    if "constant_class" in bundle:
+    if "gate_models" in bundle or "constant_scores" in bundle:
+        X, _, _ = _feature_frame(
+            df,
+            methods,
+            state_features=bundle["state_feature_names"],
+            fill=bundle["gate_fill"],
+        )
+
+        weights = np.zeros((n_rows, len(methods)), dtype=float)
+        fallback = np.asarray(
+            bundle.get(
+                "mean_target_weights",
+                np.full(len(methods), 1.0 / max(len(methods), 1), dtype=float),
+            ),
+            dtype=float,
+        )
+
+        for idx, method in enumerate(methods):
+            if method in bundle.get("gate_models", {}):
+                pred = bundle["gate_models"][method].predict(X)
+                weights[:, idx] = np.asarray(pred, dtype=float)
+            else:
+                weights[:, idx] = float(
+                    bundle.get("constant_scores", {}).get(method, fallback[idx])
+                )
+
+        weights = np.clip(weights, a_min=0.0, a_max=None)
+        zero_rows = weights.sum(axis=1) <= 0
+        if np.any(zero_rows):
+            weights[zero_rows] = fallback
+    elif "constant_class" in bundle:
         weights = np.zeros((n_rows, len(methods)), dtype=float)
         weights[:, int(bundle["constant_class"])] = 1.0
     else:
@@ -247,13 +294,13 @@ def fit_state_corrected_ensemble(
     settings_name="ensemble_xgboost",
 ):
     try:
-        from xgboost import XGBClassifier
+        from xgboost import XGBRegressor
     except ImportError as exc:
         raise ImportError(
             "XGBoost is not installed in the active environment."
         ) from exc
 
-    valid_mask, winners, obs = _build_targets(df, methods)
+    valid_mask, soft_targets, dominant, obs = _build_targets(df, methods)
     prepared = prepare_ml_dataframe(df.copy())
     state_feature_names = list(
         state_features or resolve_feature_columns(prepared, [])
@@ -265,50 +312,59 @@ def fit_state_corrected_ensemble(
         state_features=state_feature_names,
     )
 
-    present_classes = np.unique(winners)
-    counts = np.bincount(winners, minlength=len(methods))
+    counts = np.bincount(dominant, minlength=len(methods))
 
     bundle = {
         "methods": list(methods),
-        "present_classes": present_classes.tolist(),
         "state_feature_names": state_feature_names,
         "gate_fill": gate_fill,
         "gate_feature_names": gate_feature_names,
         "tail_aware": _tail_aware_config(df, settings_name=settings_name),
+        "mean_target_weights": soft_targets.mean(axis=0).tolist(),
         "class_counts": {
             methods[idx]: int(counts[idx])
             for idx in range(len(methods))
             if counts[idx] > 0
         },
         "top_features": {"gate": [], "residual": []},
+        "gate_models": {},
+        "constant_scores": {},
     }
 
-    if len(present_classes) == 1:
-        bundle["constant_class"] = int(present_classes[0])
-    else:
-        objective = "binary:logistic" if len(present_classes) == 2 else "multi:softprob"
-        eval_metric = "logloss" if len(present_classes) == 2 else "mlogloss"
-        gate_model = XGBClassifier(
-            objective=objective,
-            eval_metric=eval_metric,
+    X_train = X_all[valid_mask]
+    row_weights = _sample_weights(obs[valid_mask], settings_name=settings_name)
+
+    importance_sum = np.zeros(len(gate_feature_names), dtype=float)
+    importance_weight = 0.0
+
+    for idx, method in enumerate(methods):
+        y = soft_targets[:, idx].astype(float)
+
+        if np.allclose(y, y[0]):
+            bundle["constant_scores"][method] = float(y[0])
+            continue
+
+        gate_model = XGBRegressor(
+            objective="reg:squarederror",
+            eval_metric="rmse",
             **_common_xgb_params(settings_name=settings_name),
         )
 
-        label_map = {cls: idx for idx, cls in enumerate(present_classes)}
-        y = np.array([label_map[cls] for cls in winners], dtype=np.int32)
-
-        if objective == "multi:softprob":
-            gate_model.set_params(num_class=len(present_classes))
-
         gate_model.fit(
-            X_all[valid_mask],
+            X_train,
             y,
-            sample_weight=_sample_weights(obs[valid_mask]),
+            sample_weight=row_weights,
             verbose=False,
         )
-        bundle["gate_model"] = gate_model
+
+        bundle["gate_models"][method] = gate_model
+        avg_weight = max(float(np.mean(y)), 1e-6)
+        importance_sum += avg_weight * gate_model.feature_importances_
+        importance_weight += avg_weight
+
+    if importance_weight > 0:
         bundle["top_features"]["gate"] = sorted(
-            zip(gate_feature_names, gate_model.feature_importances_.tolist()),
+            zip(gate_feature_names, (importance_sum / importance_weight).tolist()),
             key=lambda item: item[1],
             reverse=True,
         )[:10]

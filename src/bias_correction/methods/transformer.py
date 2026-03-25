@@ -54,6 +54,10 @@ def _cfg_float(cfg, key, default):
     return float(cfg.get(key, default))
 
 
+def _cfg_str(cfg, key, default):
+    return str(cfg.get(key, default))
+
+
 # ── feature scaling ──────────────────────────────────────────────────────────
 
 def _fit_scaler(df, feature_cols, mask):
@@ -121,10 +125,66 @@ def _make_sequences(X, y, seg, seq_len, target_mask=None):
         idx.append(end)
 
     if not xs:
-        return (np.zeros((0, seq_len, n_feat), dtype=np.float32),
-                np.zeros(0, dtype=np.float32),
-                np.zeros(0, dtype=int))
+        return (
+            np.zeros((0, seq_len, n_feat), dtype=np.float32),
+            np.zeros(0, dtype=np.float32),
+            np.zeros(0, dtype=int),
+        )
     return np.array(xs, np.float32), np.array(ys, np.float32), np.array(idx, int)
+
+
+# ── target transform ─────────────────────────────────────────────────────────
+
+def _build_target(obs_values, raw_values, cfg):
+    """
+    Build training target.
+    Supported:
+      - additive_residual: obs - raw
+      - log_ratio: log(obs + eps) - log(raw + eps)
+    """
+    obs = np.asarray(obs_values, dtype=np.float32)
+    raw = np.asarray(raw_values, dtype=np.float32)
+
+    mode = _cfg_str(cfg, "target_transform", "log_ratio").strip().lower()
+    eps = np.float32(_cfg_float(cfg, "target_eps", 1e-4))
+
+    if mode == "additive_residual":
+        y = obs - raw
+        valid = np.isfinite(obs) & np.isfinite(raw)
+        return y.astype(np.float32), valid, {"mode": mode, "eps": float(eps)}
+
+    if mode == "log_ratio":
+        valid = np.isfinite(obs) & np.isfinite(raw) & (obs > -eps) & (raw > -eps)
+        y = np.full(len(obs), np.nan, dtype=np.float32)
+        y[valid] = np.log(obs[valid] + eps) - np.log(raw[valid] + eps)
+        return y.astype(np.float32), valid, {"mode": mode, "eps": float(eps)}
+
+    raise ValueError(f"Unsupported target_transform: {mode}")
+
+
+def _invert_target(pred_target, raw_values, transform_cfg):
+    """
+    Convert predicted target back to corrected Hs.
+    """
+    pred = np.asarray(pred_target, dtype=np.float32)
+    raw = np.asarray(raw_values, dtype=np.float32)
+
+    mode = str(transform_cfg.get("mode", "log_ratio")).strip().lower()
+    eps = np.float32(float(transform_cfg.get("eps", 1e-4)))
+
+    corrected = np.full(len(raw), np.nan, dtype=np.float32)
+
+    if mode == "additive_residual":
+        m = np.isfinite(raw) & np.isfinite(pred)
+        corrected[m] = raw[m] + pred[m]
+        return clip_nonnegative(corrected)
+
+    if mode == "log_ratio":
+        m = np.isfinite(raw) & np.isfinite(pred) & (raw > -eps)
+        corrected[m] = np.exp(np.log(raw[m] + eps) + pred[m]) - eps
+        return clip_nonnegative(corrected)
+
+    raise ValueError(f"Unsupported inverse target transform: {mode}")
 
 
 # ── model ────────────────────────────────────────────────────────────────────
@@ -180,13 +240,30 @@ else:
 
 # ── data-loaders / prediction ────────────────────────────────────────────────
 
-def _loader(x, y, batch_size, shuffle, use_cuda, seed, weights=None):
+def _loader(
+    x,
+    y,
+    batch_size,
+    shuffle,
+    use_cuda,
+    seed,
+    weights=None,
+    obs_values=None,
+    raw_values=None,
+):
     if weights is None:
         weights = np.ones(len(y), dtype=np.float32)
+    if obs_values is None:
+        obs_values = np.zeros(len(y), dtype=np.float32)
+    if raw_values is None:
+        raw_values = np.zeros(len(y), dtype=np.float32)
+
     ds = TensorDataset(
         torch.from_numpy(x),
         torch.from_numpy(y),
         torch.from_numpy(np.asarray(weights, dtype=np.float32)),
+        torch.from_numpy(np.asarray(obs_values, dtype=np.float32)),
+        torch.from_numpy(np.asarray(raw_values, dtype=np.float32)),
     )
     gen = torch.Generator()
     gen.manual_seed(seed)
@@ -199,15 +276,22 @@ def _loader(x, y, batch_size, shuffle, use_cuda, seed, weights=None):
         num_workers=6
     )
 
+
 def _predict(model, x, batch_size, device):
     use_cuda = device.type == "cuda"
     parts = []
     with torch.no_grad():
         for i in range(0, len(x), batch_size):
-            xb = (torch.from_numpy(x[i:i + batch_size])
-                  .to(device, non_blocking=use_cuda).contiguous())
+            xb = (
+                torch.from_numpy(x[i:i + batch_size])
+                .to(device, non_blocking=use_cuda)
+                .contiguous()
+            )
             parts.append(model(xb).cpu().numpy())
-    return np.concatenate(parts).astype(np.float32) if parts else np.array([], dtype=np.float32)
+    return (
+        np.concatenate(parts).astype(np.float32)
+        if parts else np.array([], dtype=np.float32)
+    )
 
 
 def _tail_sample_weights(values, cfg):
@@ -228,10 +312,43 @@ def _tail_sample_weights(values, cfg):
     return weights
 
 
-def _weighted_mean_loss(loss_values, sample_weights):
-    weighted = loss_values * sample_weights
-    denom = torch.clamp(sample_weights.sum(), min=1e-8)
+def _weighted_mean(values, weights):
+    weighted = values * weights
+    denom = torch.clamp(weights.sum(), min=1e-8)
     return weighted.sum() / denom
+
+
+def _invert_target_torch(pred_target, raw_values, transform_cfg):
+    mode = str(transform_cfg.get("mode", "log_ratio")).strip().lower()
+    eps = float(transform_cfg.get("eps", 1e-4))
+
+    if mode == "additive_residual":
+        corrected = raw_values + pred_target
+        return torch.clamp(corrected, min=0.0)
+
+    if mode == "log_ratio":
+        safe_raw = torch.clamp(raw_values + eps, min=eps)
+        corrected = torch.exp(torch.log(safe_raw) + pred_target) - eps
+        return torch.clamp(corrected, min=0.0)
+
+    raise ValueError(f"Unsupported inverse target transform: {mode}")
+
+
+def _mixed_loss(pred, target, sample_weights, obs_values, raw_values, transform_cfg, cfg):
+    """
+    Tail-aware dual-space loss:
+      1. keep the transformed-target fit stable
+      2. directly penalize errors in corrected Hs, where EVT sensitivity lives
+    """
+    target_loss = _weighted_mean((pred - target) ** 2, sample_weights)
+
+    pred_hs = _invert_target_torch(pred, raw_values, transform_cfg)
+    true_hs = torch.clamp(obs_values, min=0.0)
+    physical_loss = _weighted_mean((pred_hs - true_hs) ** 2, sample_weights)
+
+    target_w = _cfg_float(cfg, "target_space_loss_weight", 0.5)
+    physical_w = _cfg_float(cfg, "physical_space_loss_weight", 1.0)
+    return target_w * target_loss + physical_w * physical_loss
 
 
 # ── public API ───────────────────────────────────────────────────────────────
@@ -259,13 +376,11 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
     features = resolve_feature_columns(work, cfg.get("features", []))
     seq_len = _cfg_int(cfg, "sequence_length", 24)
 
-    y = (
-        pd.to_numeric(work[HS_OBS], errors="coerce").to_numpy(np.float32)
-        - pd.to_numeric(work[HS_MODEL], errors="coerce").to_numpy(np.float32)
-    )
+    obs_values = pd.to_numeric(work[HS_OBS], errors="coerce").to_numpy(np.float32)
+    raw_values = pd.to_numeric(work[HS_MODEL], errors="coerce").to_numpy(np.float32)
 
-    valid = np.isfinite(y)
-    pos = np.flatnonzero(valid)
+    y, valid_target, transform_cfg = _build_target(obs_values, raw_values, cfg)
+    pos = np.flatnonzero(valid_target)
 
     min_train = _cfg_int(cfg, "min_train_samples", 80)
     min_val = _cfg_int(cfg, "min_val_samples", 20)
@@ -294,9 +409,7 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
     def _target_mask(positions):
         m = np.zeros(len(work), dtype=bool)
         m[positions] = True
-        return m & valid
-
-    obs_values = pd.to_numeric(work[HS_OBS], errors="coerce").to_numpy(np.float32)
+        return m & valid_target
 
     X_train, y_train, train_end_idx = _make_sequences(
         X, y, seg, seq_len, _target_mask(train_pos)
@@ -310,13 +423,17 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
     )
 
     train_obs = obs_values[train_end_idx]
+    train_raw = raw_values[train_end_idx]
     val_obs = obs_values[val_end_idx] if len(val_end_idx) else np.zeros(0, dtype=np.float32)
+    val_raw = raw_values[val_end_idx] if len(val_end_idx) else np.zeros(0, dtype=np.float32)
+
     train_weights = _tail_sample_weights(train_obs, cfg)
     val_weights = _tail_sample_weights(val_obs, cfg) if len(val_obs) else np.zeros(0, dtype=np.float32)
 
     device = _resolve_device()
     use_cuda = device.type == "cuda"
     print(f"[Transformer] Training device: {device}")
+    print(f"[Transformer] Target transform: {transform_cfg['mode']} (eps={transform_cfg['eps']})")
 
     model_cfg = dict(
         d_model=_cfg_int(cfg, "d_model", 64),
@@ -338,7 +455,6 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
         weight_decay=_cfg_float(cfg, "weight_decay", 1e-4),
     )
 
-    loss_fn = nn.HuberLoss(delta=1.0, reduction="none")
     batch_size = _cfg_int(cfg, "batch_size", 64)
 
     train_dl = _loader(
@@ -349,6 +465,8 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
         use_cuda=use_cuda,
         seed=seed,
         weights=train_weights,
+        obs_values=train_obs,
+        raw_values=train_raw,
     )
 
     val_dl = (
@@ -360,6 +478,8 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
             use_cuda=use_cuda,
             seed=seed,
             weights=val_weights,
+            obs_values=val_obs,
+            raw_values=val_raw,
         )
         if len(X_val)
         else None
@@ -376,12 +496,16 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
 
         model.train()
 
-        for xb, yb, wb in train_dl:
+        for xb, yb, wb, ob, rb in train_dl:
             xb = xb.to(device, non_blocking=use_cuda).contiguous()
             yb = yb.to(device, non_blocking=use_cuda)
             wb = wb.to(device, non_blocking=use_cuda)
+            ob = ob.to(device, non_blocking=use_cuda)
+            rb = rb.to(device, non_blocking=use_cuda)
+
             optimizer.zero_grad(set_to_none=True)
-            loss = _weighted_mean_loss(loss_fn(model(xb), yb), wb)
+            pred = model(xb)
+            loss = _mixed_loss(pred, yb, wb, ob, rb, transform_cfg, cfg)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -390,18 +514,19 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
 
             model.eval()
             with torch.no_grad():
-                vloss = np.mean(
-                    [
-                        _weighted_mean_loss(
-                            loss_fn(
-                                model(xb.to(device, non_blocking=use_cuda).contiguous()),
-                                yb.to(device, non_blocking=use_cuda),
-                            ),
-                            wb.to(device, non_blocking=use_cuda),
-                        ).item()
-                        for xb, yb, wb in val_dl
-                    ]
-                )
+                val_losses = []
+                for xb, yb, wb, ob, rb in val_dl:
+                    xb = xb.to(device, non_blocking=use_cuda).contiguous()
+                    yb = yb.to(device, non_blocking=use_cuda)
+                    wb = wb.to(device, non_blocking=use_cuda)
+                    ob = ob.to(device, non_blocking=use_cuda)
+                    rb = rb.to(device, non_blocking=use_cuda)
+
+                    pred = model(xb)
+                    vloss = _mixed_loss(pred, yb, wb, ob, rb, transform_cfg, cfg)
+                    val_losses.append(vloss.item())
+
+                vloss = float(np.mean(val_losses)) if val_losses else np.inf
 
             # ---------------------------
             # Optuna pruning (optional)
@@ -412,6 +537,7 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
                 if trial.should_prune():
                     import optuna
                     raise optuna.exceptions.TrialPruned()
+
             if vloss < best_val:
                 best_val = vloss
                 no_improve = 0
@@ -443,6 +569,7 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
         "config": model_cfg,
         "device": device.type,
         "model": model,
+        "target_transform": transform_cfg,
     }
 
 
@@ -454,32 +581,47 @@ def apply(df, bundle):
         out[TIME] = pd.to_datetime(out[TIME], errors="coerce")
         sort_cols = ["source", TIME] if "source" in out.columns else [TIME]
         out = out.sort_values(sort_cols).reset_index(drop=False).rename(
-            columns={"index": "_orig_index"})
+            columns={"index": "_orig_index"}
+        )
     else:
         out["_orig_index"] = np.arange(len(out))
 
     prep = prepare_ml_dataframe(out.copy())
-    X = _scale_features(prep, bundle["features"], bundle["fill"],
-                        bundle["mean"], bundle["std"])
+    X = _scale_features(
+        prep,
+        bundle["features"],
+        bundle["fill"],
+        bundle["mean"],
+        bundle["std"],
+    )
+
     hs = pd.to_numeric(prep[HS_MODEL], errors="coerce").to_numpy(np.float32)
 
     src_col = "source" if "source" in prep.columns else None
     seg = _segment_ids(prep, TIME, source_col=src_col)
 
     X_seq, _, end_idx = _make_sequences(
-        X, np.zeros(len(prep), dtype=np.float32),
-        seg, bundle["seq_len"], np.isfinite(hs),
+        X,
+        np.zeros(len(prep), dtype=np.float32),
+        seg,
+        bundle["seq_len"],
+        np.isfinite(hs),
     )
 
-    residual = np.full(len(prep), np.nan, dtype=np.float32)
+    pred_target = np.full(len(prep), np.nan, dtype=np.float32)
     if len(X_seq) > 0:
         device = _resolve_device()
         model = bundle["model"].to(device).eval()
-        residual[end_idx] = _predict(model, X_seq, batch_size=256, device=device)
+        pred_target[end_idx] = _predict(model, X_seq, batch_size=256, device=device)
 
     corrected = hs.copy()
-    m = np.isfinite(residual)
-    corrected[m] = hs[m] + residual[m]
+    restored = _invert_target(pred_target, hs, bundle["target_transform"])
+    m = np.isfinite(restored)
+    corrected[m] = restored[m]
     prep[HS_MODEL] = clip_nonnegative(corrected)
 
-    return prep.sort_values("_orig_index").drop(columns=["_orig_index"]).reset_index(drop=True)
+    return (
+        prep.sort_values("_orig_index")
+        .drop(columns=["_orig_index"])
+        .reset_index(drop=True)
+    )

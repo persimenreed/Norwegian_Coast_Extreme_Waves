@@ -77,6 +77,19 @@ def make_objective(df, training_members, n_splits, settings_name):
     y_true = df[OBS].values
 
     def objective(trial):
+        tail_weight_q90 = trial.suggest_categorical(
+            "tail_weight_q90",
+            [1.0, 1.5, 2.0, 2.5, 3.0],
+        )
+        tail_weight_q95 = tail_weight_q90 + trial.suggest_categorical(
+            "tail_weight_q95_extra",
+            [0.0, 0.5, 1.0, 2.0, 3.0],
+        )
+        tail_weight_q99 = tail_weight_q95 + trial.suggest_categorical(
+            "tail_weight_q99_extra",
+            [1.0, 2.0, 4.0, 6.0],
+        )
+
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 100, 800),
             "max_depth": trial.suggest_int("max_depth", 3, 10),
@@ -96,6 +109,16 @@ def make_objective(df, training_members, n_splits, settings_name):
             ),
             "reg_lambda": trial.suggest_float(
                 "reg_lambda", 1e-4, 10.0, log=True
+            ),
+            "tail_weight_q90": tail_weight_q90,
+            "tail_weight_q95": tail_weight_q95,
+            "tail_weight_q99": tail_weight_q99,
+            "tail_aware": trial.suggest_categorical("tail_aware", [True]),
+            "tail_strength_q95": trial.suggest_float(
+                "tail_strength_q95", 0.0, 0.4
+            ),
+            "tail_strength_q99": trial.suggest_float(
+                "tail_strength_q99", 0.1, 0.8
             ),
             "random_state": 1,
         }

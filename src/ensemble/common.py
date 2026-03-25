@@ -643,7 +643,7 @@ def save_ensemble_report(
         f"application_member_family: {member_family}",
         f"members: {' | '.join(methods)}",
         "",
-        "winner_counts:",
+        "closest_expert_counts:",
     ]
 
     for method in methods:
