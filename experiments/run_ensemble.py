@@ -29,7 +29,7 @@ def _print_summary(res):
     print(f"Training cases: {', '.join(res['training_labels'])}")
     print(f"Apply member family: {res['application_member_family']}")
 
-    print("\nWinner counts in training labels:")
+    print("\nClosest-expert counts in training labels:")
     for name, count in sorted(res["class_counts"].items()):
         print(f"  {name}: {count}")
 
