@@ -1,14 +1,16 @@
 from metocean_api import ts
 
 
-##### FEDJEOSEN #####
+##### Bergen #####
 wind_wave_ts = ts.TimeSeries(
-    lon=4.662131,
-    lat=60.732916,
+    lon=4.8303750,
+    lat=60.3809388,
     start_time="1959-01-01",
     end_time="2025-11-30",
     product="NORA3_wind_wave"
 )
+
+
 
 wind_wave_ts.import_data(save_csv=True, save_nc=False, use_cache=True)
 
