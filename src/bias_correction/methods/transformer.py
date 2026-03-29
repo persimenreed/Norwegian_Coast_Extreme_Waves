@@ -6,10 +6,20 @@ import pandas as pd
 
 from src.settings import get_method_settings
 from src.bias_correction.methods.common import (
-    TIME, HS_MODEL, HS_OBS,
-    HS_QUANTILE, HS_QUANTILE_BIAS, HS_QUANTILE_BASELINE,
-    prepare_ml_dataframe, resolve_feature_columns, clip_nonnegative,
-    build_quantile_bias_mapping, quantile_bias_features,
+    TIME,
+    HS_MODEL,
+    HS_OBS,
+    HS_QUANTILE_BASELINE,
+    cfg_int,
+    cfg_float,
+    prepare_ml_dataframe,
+    resolve_feature_columns,
+    clip_nonnegative,
+    quantile_feature_columns,
+    augment_quantile_features,
+    build_target_transform,
+    invert_target,
+    build_tail_sample_weights,
 )
 
 try:
@@ -46,40 +56,6 @@ def _resolve_device():
     device = torch.device("cuda")
     torch.backends.cudnn.benchmark = True
     return device
-
-
-def _cfg_int(cfg, key, default):
-    return int(cfg.get(key, default))
-
-
-def _cfg_float(cfg, key, default):
-    return float(cfg.get(key, default))
-
-
-def _cfg_str(cfg, key, default):
-    return str(cfg.get(key, default))
-
-
-def _quantile_feature_columns(features):
-    out = list(features)
-    for col in (HS_QUANTILE, HS_QUANTILE_BIAS, HS_QUANTILE_BASELINE):
-        if col not in out:
-            out.append(col)
-    return out
-
-
-def _augment_quantile_features(df, raw_values, transform_cfg, reference_values=None):
-    out = df.copy()
-    extras = quantile_bias_features(
-        raw_values,
-        transform_cfg["quantile_mapping"],
-        reference_values=reference_values if reference_values is not None else raw_values,
-        mode=transform_cfg.get("quantile_bias_mode", "additive"),
-        eps=float(transform_cfg.get("eps", 1e-4)),
-    )
-    for col, values in extras.items():
-        out[col] = values
-    return out, extras
 
 
 # ── feature scaling ──────────────────────────────────────────────────────────
@@ -155,90 +131,6 @@ def _make_sequences(X, y, seg, seq_len, target_mask=None):
             np.zeros(0, dtype=int),
         )
     return np.array(xs, np.float32), np.array(ys, np.float32), np.array(idx, int)
-
-
-# ── target transform ─────────────────────────────────────────────────────────
-
-def _build_target(obs_values, raw_values, cfg):
-    """
-    Build training target.
-    Supported:
-      - additive_residual: obs - raw
-      - log_ratio: log(obs + eps) - log(raw + eps)
-    """
-    obs = np.asarray(obs_values, dtype=np.float32)
-    raw = np.asarray(raw_values, dtype=np.float32)
-
-    mode = _cfg_str(cfg, "target_transform", "log_ratio").strip().lower()
-    eps = np.float32(_cfg_float(cfg, "target_eps", 1e-4))
-
-    if mode == "quantile_residual":
-        qmap = build_quantile_bias_mapping(
-            raw,
-            obs,
-            n_quantiles=int(cfg.get("quantile_grid_size", 401)),
-            p_min=float(cfg.get("quantile_p_min", 1e-3)),
-            p_max=float(cfg.get("quantile_p_max", 0.999)),
-        )
-        extras = quantile_bias_features(
-            raw,
-            qmap,
-            reference_values=raw,
-            mode=_cfg_str(cfg, "quantile_bias_mode", "additive"),
-            eps=float(eps),
-        )
-        baseline = extras[HS_QUANTILE_BASELINE]
-        y = obs - baseline
-        valid = np.isfinite(obs) & np.isfinite(baseline)
-        return (
-            y.astype(np.float32),
-            valid,
-            {
-                "mode": mode,
-                "eps": float(eps),
-                "quantile_mapping": qmap,
-                "quantile_bias_mode": _cfg_str(cfg, "quantile_bias_mode", "additive"),
-            },
-        )
-
-    if mode == "additive_residual":
-        y = obs - raw
-        valid = np.isfinite(obs) & np.isfinite(raw)
-        return y.astype(np.float32), valid, {"mode": mode, "eps": float(eps)}
-
-    if mode == "log_ratio":
-        valid = np.isfinite(obs) & np.isfinite(raw) & (obs > -eps) & (raw > -eps)
-        y = np.full(len(obs), np.nan, dtype=np.float32)
-        y[valid] = np.log(obs[valid] + eps) - np.log(raw[valid] + eps)
-        return y.astype(np.float32), valid, {"mode": mode, "eps": float(eps)}
-
-    raise ValueError(f"Unsupported target_transform: {mode}")
-
-
-def _invert_target(pred_target, base_values, transform_cfg):
-    """
-    Convert predicted target back to corrected Hs.
-    """
-    pred = np.asarray(pred_target, dtype=np.float32)
-    base = np.asarray(base_values, dtype=np.float32)
-
-    mode = str(transform_cfg.get("mode", "log_ratio")).strip().lower()
-    eps = np.float32(float(transform_cfg.get("eps", 1e-4)))
-
-    corrected = np.full(len(base), np.nan, dtype=np.float32)
-
-    if mode in {"additive_residual", "quantile_residual"}:
-        m = np.isfinite(base) & np.isfinite(pred)
-        corrected[m] = base[m] + pred[m]
-        return clip_nonnegative(corrected)
-
-    if mode == "log_ratio":
-        m = np.isfinite(base) & np.isfinite(pred) & (base > -eps)
-        corrected[m] = np.exp(np.log(base[m] + eps) + pred[m]) - eps
-        return clip_nonnegative(corrected)
-
-    raise ValueError(f"Unsupported inverse target transform: {mode}")
-
 
 # ── model ────────────────────────────────────────────────────────────────────
 
@@ -346,25 +238,6 @@ def _predict(model, x, batch_size, device):
         if parts else np.array([], dtype=np.float32)
     )
 
-
-def _tail_sample_weights(values, cfg):
-    values = np.asarray(values, dtype=float)
-    weights = np.ones(len(values), dtype=np.float32)
-    valid = values[np.isfinite(values)]
-
-    if len(valid) < 20:
-        return weights
-
-    q90 = float(np.nanquantile(valid, float(cfg.get("tail_weight_q90_quantile", 0.90))))
-    q95 = float(np.nanquantile(valid, float(cfg.get("tail_weight_q95_quantile", 0.95))))
-    q99 = float(np.nanquantile(valid, float(cfg.get("tail_weight_q99_quantile", 0.99))))
-
-    weights[values >= q90] = np.float32(_cfg_float(cfg, "tail_weight_q90", 2.0))
-    weights[values >= q95] = np.float32(_cfg_float(cfg, "tail_weight_q95", 3.0))
-    weights[values >= q99] = np.float32(_cfg_float(cfg, "tail_weight_q99", 5.0))
-    return weights
-
-
 def _weighted_mean(values, weights):
     weighted = values * weights
     denom = torch.clamp(weights.sum(), min=1e-8)
@@ -399,8 +272,8 @@ def _mixed_loss(pred, target, sample_weights, obs_values, base_values, transform
     true_hs = torch.clamp(obs_values, min=0.0)
     physical_loss = _weighted_mean((pred_hs - true_hs) ** 2, sample_weights)
 
-    target_w = _cfg_float(cfg, "target_space_loss_weight", 0.5)
-    physical_w = _cfg_float(cfg, "physical_space_loss_weight", 1.0)
+    target_w = cfg_float(cfg, "target_space_loss_weight", 0.5)
+    physical_w = cfg_float(cfg, "physical_space_loss_weight", 1.0)
     return target_w * target_loss + physical_w * physical_loss
 
 
@@ -414,7 +287,7 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
     cfg = get_method_settings(settings_name)
     if not cfg:
         raise ValueError(f"Missing transformer settings block '{settings_name}'.")
-    seed = _cfg_int(cfg, "random_state", 1)
+    seed = cfg_int(cfg, "random_state", 1)
     _set_seed(seed)
 
     work = df.copy()
@@ -429,10 +302,10 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
     obs_values = pd.to_numeric(work[HS_OBS], errors="coerce").to_numpy(np.float32)
     raw_values = pd.to_numeric(work[HS_MODEL], errors="coerce").to_numpy(np.float32)
 
-    y, valid_target, transform_cfg = _build_target(obs_values, raw_values, cfg)
+    y, valid_target, transform_cfg = build_target_transform(obs_values, raw_values, cfg)
 
     if transform_cfg["mode"] == "quantile_residual":
-        work, quantile_extras = _augment_quantile_features(
+        work, quantile_extras = augment_quantile_features(
             work,
             raw_values,
             transform_cfg,
@@ -443,14 +316,14 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
 
     features = resolve_feature_columns(work, cfg.get("features", []))
     if transform_cfg["mode"] == "quantile_residual":
-        features = _quantile_feature_columns(features)
+        features = quantile_feature_columns(features)
 
-    seq_len = _cfg_int(cfg, "sequence_length", 24)
+    seq_len = cfg_int(cfg, "sequence_length", 24)
     pos = np.flatnonzero(valid_target)
 
-    min_train = _cfg_int(cfg, "min_train_samples", 80)
-    min_val = _cfg_int(cfg, "min_val_samples", 20)
-    val_frac = _cfg_float(cfg, "validation_fraction", 0.2)
+    min_train = cfg_int(cfg, "min_train_samples", 80)
+    min_val = cfg_int(cfg, "min_val_samples", 20)
+    val_frac = cfg_float(cfg, "validation_fraction", 0.2)
 
     if len(pos) < min_train:
         raise ValueError("Too few valid samples for transformer.")
@@ -498,8 +371,8 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
     val_obs = obs_values[val_end_idx] if len(val_end_idx) else np.zeros(0, dtype=np.float32)
     val_base = base_values[val_end_idx] if len(val_end_idx) else np.zeros(0, dtype=np.float32)
 
-    train_weights = _tail_sample_weights(train_obs, cfg)
-    val_weights = _tail_sample_weights(val_obs, cfg) if len(val_obs) else np.zeros(0, dtype=np.float32)
+    train_weights = build_tail_sample_weights(train_obs, cfg)
+    val_weights = build_tail_sample_weights(val_obs, cfg) if len(val_obs) else np.zeros(0, dtype=np.float32)
 
     device = _resolve_device()
     use_cuda = device.type == "cuda"
@@ -507,11 +380,11 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
     print(f"[Transformer] Target transform: {transform_cfg['mode']} (eps={transform_cfg['eps']})")
 
     model_cfg = dict(
-        d_model=_cfg_int(cfg, "d_model", 64),
-        nhead=_cfg_int(cfg, "nhead", 4),
-        num_layers=_cfg_int(cfg, "num_layers", 2),
-        dim_feedforward=_cfg_int(cfg, "dim_feedforward", 128),
-        dropout=_cfg_float(cfg, "dropout", 0.1),
+        d_model=cfg_int(cfg, "d_model", 64),
+        nhead=cfg_int(cfg, "nhead", 4),
+        num_layers=cfg_int(cfg, "num_layers", 2),
+        dim_feedforward=cfg_int(cfg, "dim_feedforward", 128),
+        dropout=cfg_float(cfg, "dropout", 0.1),
     )
 
     model = _TransformerModel(
@@ -522,11 +395,11 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=_cfg_float(cfg, "learning_rate", 1e-3),
-        weight_decay=_cfg_float(cfg, "weight_decay", 1e-4),
+        lr=cfg_float(cfg, "learning_rate", 1e-3),
+        weight_decay=cfg_float(cfg, "weight_decay", 1e-4),
     )
 
-    batch_size = _cfg_int(cfg, "batch_size", 64)
+    batch_size = cfg_int(cfg, "batch_size", 64)
 
     train_dl = _loader(
         X_train,
@@ -560,8 +433,8 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
     best_val = np.inf
     no_improve = 0
 
-    max_epochs = _cfg_int(cfg, "max_epochs", 200)
-    patience = _cfg_int(cfg, "patience", 20)
+    max_epochs = cfg_int(cfg, "max_epochs", 200)
+    patience = cfg_int(cfg, "patience", 20)
 
     for epoch in range(max_epochs):
 
@@ -662,7 +535,7 @@ def apply(df, bundle):
     transform_cfg = bundle["target_transform"]
 
     if transform_cfg["mode"] == "quantile_residual":
-        prep, extras = _augment_quantile_features(
+        prep, extras = augment_quantile_features(
             prep,
             hs,
             transform_cfg,
@@ -698,7 +571,7 @@ def apply(df, bundle):
         pred_target[end_idx] = _predict(model, X_seq, batch_size=256, device=device)
 
     corrected = hs.copy()
-    restored = _invert_target(pred_target, base_values, transform_cfg)
+    restored = invert_target(pred_target, base_values, transform_cfg)
     m = np.isfinite(restored)
     corrected[m] = restored[m]
     prep[HS_MODEL] = clip_nonnegative(corrected)

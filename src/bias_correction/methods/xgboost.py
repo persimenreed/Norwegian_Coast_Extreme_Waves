@@ -6,23 +6,15 @@ from src.bias_correction.methods.common import (
     TIME,
     HS_MODEL,
     HS_OBS,
-    HS_QUANTILE,
-    HS_QUANTILE_BIAS,
     HS_QUANTILE_BASELINE,
     prepare_ml_dataframe,
     resolve_feature_columns,
-    clip_nonnegative,
-    build_quantile_bias_mapping,
-    quantile_bias_features,
+    quantile_feature_columns,
+    augment_quantile_features,
+    build_target_transform,
+    invert_target,
+    build_tail_sample_weights,
 )
-
-
-def _cfg_float(cfg, key, default):
-    return float(cfg.get(key, default))
-
-
-def _cfg_str(cfg, key, default):
-    return str(cfg.get(key, default))
 
 
 def _prepare_features(df, feature_cols, fill=None):
@@ -40,116 +32,6 @@ def _prepare_features(df, feature_cols, fill=None):
         X[col] = pd.to_numeric(X[col], errors="coerce").fillna(fill[col])
 
     return X.values.astype(np.float32), fill
-
-
-def _quantile_feature_columns(features):
-    out = list(features)
-    for col in (HS_QUANTILE, HS_QUANTILE_BIAS, HS_QUANTILE_BASELINE):
-        if col not in out:
-            out.append(col)
-    return out
-
-
-def _augment_quantile_features(df, raw_values, transform_cfg, reference_values=None):
-    out = df.copy()
-    extras = quantile_bias_features(
-        raw_values,
-        transform_cfg["quantile_mapping"],
-        reference_values=reference_values if reference_values is not None else raw_values,
-        mode=transform_cfg.get("quantile_bias_mode", "additive"),
-        eps=float(transform_cfg.get("eps", 1e-4)),
-    )
-    for col, values in extras.items():
-        out[col] = values
-    return out, extras
-
-
-def _build_target(obs_values, raw_values, cfg):
-    obs = np.asarray(obs_values, dtype=np.float32)
-    raw = np.asarray(raw_values, dtype=np.float32)
-
-    mode = _cfg_str(cfg, "target_transform", "log_ratio").strip().lower()
-    eps = np.float32(_cfg_float(cfg, "target_eps", 1e-4))
-
-    if mode == "quantile_residual":
-        qmap = build_quantile_bias_mapping(
-            raw,
-            obs,
-            n_quantiles=int(cfg.get("quantile_grid_size", 401)),
-            p_min=float(cfg.get("quantile_p_min", 1e-3)),
-            p_max=float(cfg.get("quantile_p_max", 0.999)),
-        )
-        extras = quantile_bias_features(
-            raw,
-            qmap,
-            reference_values=raw,
-            mode=_cfg_str(cfg, "quantile_bias_mode", "additive"),
-            eps=float(eps),
-        )
-        baseline = extras[HS_QUANTILE_BASELINE]
-        y = obs - baseline
-        valid = np.isfinite(obs) & np.isfinite(baseline)
-        return (
-            y.astype(np.float32),
-            valid,
-            {
-                "mode": mode,
-                "eps": float(eps),
-                "quantile_mapping": qmap,
-                "quantile_bias_mode": _cfg_str(cfg, "quantile_bias_mode", "additive"),
-            },
-        )
-
-    if mode == "additive_residual":
-        y = obs - raw
-        valid = np.isfinite(obs) & np.isfinite(raw)
-        return y.astype(np.float32), valid, {"mode": mode, "eps": float(eps)}
-
-    if mode == "log_ratio":
-        valid = np.isfinite(obs) & np.isfinite(raw) & (obs > -eps) & (raw > -eps)
-        y = np.full(len(obs), np.nan, dtype=np.float32)
-        y[valid] = np.log(obs[valid] + eps) - np.log(raw[valid] + eps)
-        return y.astype(np.float32), valid, {"mode": mode, "eps": float(eps)}
-
-    raise ValueError(f"Unsupported target_transform: {mode}")
-
-
-def _invert_target(pred_target, base_values, transform_cfg):
-    pred = np.asarray(pred_target, dtype=np.float32)
-    base = np.asarray(base_values, dtype=np.float32)
-
-    mode = str(transform_cfg.get("mode", "log_ratio")).strip().lower()
-    eps = np.float32(float(transform_cfg.get("eps", 1e-4)))
-
-    corrected = np.full(len(base), np.nan, dtype=np.float32)
-
-    if mode in {"additive_residual", "quantile_residual"}:
-        m = np.isfinite(base) & np.isfinite(pred)
-        corrected[m] = base[m] + pred[m]
-        return clip_nonnegative(corrected)
-
-    if mode == "log_ratio":
-        m = np.isfinite(base) & np.isfinite(pred) & (base > -eps)
-        corrected[m] = np.exp(np.log(base[m] + eps) + pred[m]) - eps
-        return clip_nonnegative(corrected)
-
-    raise ValueError(f"Unsupported inverse target transform: {mode}")
-
-
-def _build_sample_weights(obs_values, cfg):
-    obs = np.asarray(obs_values, dtype=float)
-    m = np.isfinite(obs)
-    w = np.ones(len(obs), dtype=float)
-
-    if np.sum(m) >= 20:
-        q90 = np.nanquantile(obs[m], float(cfg.get("tail_weight_q90_quantile", 0.90)))
-        q95 = np.nanquantile(obs[m], float(cfg.get("tail_weight_q95_quantile", 0.95)))
-        q99 = np.nanquantile(obs[m], float(cfg.get("tail_weight_q99_quantile", 0.99)))
-        w[m & (obs >= q90)] = _cfg_float(cfg, "tail_weight_q90", 2.0)
-        w[m & (obs >= q95)] = _cfg_float(cfg, "tail_weight_q95", 3.0)
-        w[m & (obs >= q99)] = _cfg_float(cfg, "tail_weight_q99", 5.0)
-
-    return w
 
 
 def fit(df, settings_name=None):
@@ -176,10 +58,10 @@ def fit(df, settings_name=None):
 
     obs = pd.to_numeric(work[HS_OBS], errors="coerce").values.astype(np.float32)
     raw = pd.to_numeric(work[HS_MODEL], errors="coerce").values.astype(np.float32)
-    y, valid_target, transform_cfg = _build_target(obs, raw, cfg)
+    y, valid_target, transform_cfg = build_target_transform(obs, raw, cfg)
 
     if transform_cfg["mode"] == "quantile_residual":
-        work, _ = _augment_quantile_features(
+        work, _ = augment_quantile_features(
             work,
             raw,
             transform_cfg,
@@ -188,7 +70,7 @@ def fit(df, settings_name=None):
 
     features = resolve_feature_columns(work, cfg.get("features", []))
     if transform_cfg["mode"] == "quantile_residual":
-        features = _quantile_feature_columns(features)
+        features = quantile_feature_columns(features)
 
     valid_idx = np.flatnonzero(valid_target)
 
@@ -197,7 +79,7 @@ def fit(df, settings_name=None):
         raise ValueError("Too few valid samples for XGBoost.")
 
     X_all, fill = _prepare_features(work, features)
-    weights_all = _build_sample_weights(obs, cfg)
+    weights_all = build_tail_sample_weights(obs, cfg, dtype=float)
 
     X_train = X_all[valid_idx]
     y_train = y[valid_idx]
@@ -253,7 +135,7 @@ def apply(df, bundle):
 
     if transform_cfg.get("mode") == "quantile_residual":
         raw = pd.to_numeric(prepared[HS_MODEL], errors="coerce").values.astype(np.float32)
-        prepared, extras = _augment_quantile_features(
+        prepared, extras = augment_quantile_features(
             prepared,
             raw,
             transform_cfg,
@@ -266,7 +148,7 @@ def apply(df, bundle):
     X, _ = _prepare_features(prepared, bundle["features"], bundle["fill"])
 
     residual = bundle["model"].predict(X)
-    prepared[HS_MODEL] = _invert_target(
+    prepared[HS_MODEL] = invert_target(
         residual,
         base_values,
         transform_cfg,

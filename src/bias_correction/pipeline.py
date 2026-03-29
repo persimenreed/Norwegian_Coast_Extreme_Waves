@@ -18,6 +18,8 @@ from src.bias_correction.data import (
 from src.bias_correction.registry import get_method
 from src.bias_correction.validation import iter_local_cv_splits
 
+_METHODS_WITH_SETTINGS = {"xgboost", "transformer"}
+
 
 def _ensure_parent(path_str):
     Path(path_str).parent.mkdir(parents=True, exist_ok=True)
@@ -80,7 +82,7 @@ def _validation_subset_to_output(df_base, df_corrected, method_name, meta):
 
 
 def _fit_kwargs(method_name, settings_name=None):
-    if method_name in {"xgboost", "transformer"}:
+    if method_name in _METHODS_WITH_SETTINGS:
         if not settings_name:
             raise ValueError(
                 f"settings_name must be provided for bias-correction method '{method_name}'."
@@ -89,10 +91,25 @@ def _fit_kwargs(method_name, settings_name=None):
     return {}
 
 
-def _fit_apply_save(method_name, df_train, df_hind, location, prefix, settings_name=None):
+def _settings_name(method_name, location):
+    if method_name in _METHODS_WITH_SETTINGS:
+        return f"{method_name}_{location}"
+    return None
+
+
+def _fit_apply(method_name, df_train, df_apply, settings_name=None):
     method = get_method(method_name)
     model = method.fit(df_train, **_fit_kwargs(method_name, settings_name=settings_name))
-    df_pred = method.apply(df_hind.copy(), model)
+    return model, method.apply(df_apply.copy(), model)
+
+
+def _fit_apply_save(method_name, df_train, df_hind, location, prefix, settings_name=None):
+    model, df_pred = _fit_apply(
+        method_name,
+        df_train,
+        df_hind,
+        settings_name=settings_name,
+    )
 
     out_path = format_path(
         "corrected",
@@ -113,9 +130,12 @@ def _fit_apply_validation(
     meta,
     settings_name=None,
 ):
-    method = get_method(method_name)
-    model = method.fit(df_train, **_fit_kwargs(method_name, settings_name=settings_name))
-    df_pred = method.apply(df_valid.copy(), model)
+    model, df_pred = _fit_apply(
+        method_name,
+        df_train,
+        df_valid,
+        settings_name=settings_name,
+    )
 
     out = _validation_subset_to_output(
         df_base=df_valid,
@@ -140,12 +160,7 @@ def _fit_apply_validation(
 
 def _run_local_cv(location, df_pairs, df_hind, saved, methods):
     for name in methods:
-        method = get_method(name)
-        settings_name = (
-            f"{name}_{location}"
-            if location in get_buoy_locations() and name in {"xgboost", "transformer"}
-            else None
-        )
+        settings_name = _settings_name(name, location)
 
         oof_parts = []
         used_folds = 0
@@ -154,11 +169,12 @@ def _run_local_cv(location, df_pairs, df_hind, saved, methods):
             df_train = df_pairs.iloc[split["train_idx"]].copy()
             df_test = df_pairs.iloc[split["test_idx"]].copy()
 
-            model = method.fit(
+            _, df_pred = _fit_apply(
+                name,
                 df_train,
-                **_fit_kwargs(name, settings_name=settings_name),
+                df_test,
+                settings_name=settings_name,
             )
-            df_pred = method.apply(df_test.copy(), model)
 
             out = _validation_subset_to_output(
                 df_base=df_test,
@@ -212,7 +228,7 @@ def _run_transfer(location, df_hind, df_pairs_target_or_none, saved, methods):
 
         for name in methods:
             prefix = f"transfer_{source}_"
-            settings_name = f"{name}_{source}" if name in {"xgboost", "transformer"} else None
+            settings_name = _settings_name(name, source)
 
             corr_path = _fit_apply_save(
                 method_name=name,

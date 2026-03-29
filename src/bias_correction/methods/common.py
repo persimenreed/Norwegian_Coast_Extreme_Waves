@@ -20,6 +20,18 @@ def clip_nonnegative(x, eps=0.0):
     return np.maximum(x, eps)
 
 
+def cfg_int(cfg, key, default):
+    return int(cfg.get(key, default))
+
+
+def cfg_float(cfg, key, default):
+    return float(cfg.get(key, default))
+
+
+def cfg_str(cfg, key, default):
+    return str(cfg.get(key, default))
+
+
 def finite_pair_mask(x, y):
     x = np.asarray(x, float)
     y = np.asarray(y, float)
@@ -61,6 +73,14 @@ def add_direction_features(df):
 def prepare_ml_dataframe(df):
     out = add_time_features(df)
     out = add_direction_features(out)
+    return out
+
+
+def quantile_feature_columns(features):
+    out = list(features)
+    for col in (HS_QUANTILE, HS_QUANTILE_BIAS, HS_QUANTILE_BASELINE):
+        if col not in out:
+            out.append(col)
     return out
 
 
@@ -231,3 +251,105 @@ def quantile_bias_features(
         HS_QUANTILE_BIAS: bias.astype(np.float32),
         HS_QUANTILE_BASELINE: baseline,
     }
+
+
+def augment_quantile_features(df, raw_values, transform_cfg, reference_values=None):
+    out = df.copy()
+    extras = quantile_bias_features(
+        raw_values,
+        transform_cfg["quantile_mapping"],
+        reference_values=reference_values if reference_values is not None else raw_values,
+        mode=transform_cfg.get("quantile_bias_mode", "additive"),
+        eps=float(transform_cfg.get("eps", 1e-4)),
+    )
+    for col, values in extras.items():
+        out[col] = values
+    return out, extras
+
+
+def build_target_transform(obs_values, raw_values, cfg):
+    obs = np.asarray(obs_values, dtype=np.float32)
+    raw = np.asarray(raw_values, dtype=np.float32)
+
+    mode = cfg_str(cfg, "target_transform", "log_ratio").strip().lower()
+    eps = np.float32(cfg_float(cfg, "target_eps", 1e-4))
+
+    if mode == "quantile_residual":
+        qmap = build_quantile_bias_mapping(
+            raw,
+            obs,
+            n_quantiles=int(cfg.get("quantile_grid_size", 401)),
+            p_min=float(cfg.get("quantile_p_min", 1e-3)),
+            p_max=float(cfg.get("quantile_p_max", 0.999)),
+        )
+        extras = quantile_bias_features(
+            raw,
+            qmap,
+            reference_values=raw,
+            mode=cfg_str(cfg, "quantile_bias_mode", "additive"),
+            eps=float(eps),
+        )
+        baseline = extras[HS_QUANTILE_BASELINE]
+        y = obs - baseline
+        valid = np.isfinite(obs) & np.isfinite(baseline)
+        return (
+            y.astype(np.float32),
+            valid,
+            {
+                "mode": mode,
+                "eps": float(eps),
+                "quantile_mapping": qmap,
+                "quantile_bias_mode": cfg_str(cfg, "quantile_bias_mode", "additive"),
+            },
+        )
+
+    if mode == "additive_residual":
+        y = obs - raw
+        valid = np.isfinite(obs) & np.isfinite(raw)
+        return y.astype(np.float32), valid, {"mode": mode, "eps": float(eps)}
+
+    if mode == "log_ratio":
+        valid = np.isfinite(obs) & np.isfinite(raw) & (obs > -eps) & (raw > -eps)
+        y = np.full(len(obs), np.nan, dtype=np.float32)
+        y[valid] = np.log(obs[valid] + eps) - np.log(raw[valid] + eps)
+        return y.astype(np.float32), valid, {"mode": mode, "eps": float(eps)}
+
+    raise ValueError(f"Unsupported target_transform: {mode}")
+
+
+def invert_target(pred_target, base_values, transform_cfg):
+    pred = np.asarray(pred_target, dtype=np.float32)
+    base = np.asarray(base_values, dtype=np.float32)
+
+    mode = str(transform_cfg.get("mode", "log_ratio")).strip().lower()
+    eps = np.float32(float(transform_cfg.get("eps", 1e-4)))
+
+    corrected = np.full(len(base), np.nan, dtype=np.float32)
+
+    if mode in {"additive_residual", "quantile_residual"}:
+        m = np.isfinite(base) & np.isfinite(pred)
+        corrected[m] = base[m] + pred[m]
+        return clip_nonnegative(corrected)
+
+    if mode == "log_ratio":
+        m = np.isfinite(base) & np.isfinite(pred) & (base > -eps)
+        corrected[m] = np.exp(np.log(base[m] + eps) + pred[m]) - eps
+        return clip_nonnegative(corrected)
+
+    raise ValueError(f"Unsupported inverse target transform: {mode}")
+
+
+def build_tail_sample_weights(obs_values, cfg, dtype=np.float32):
+    obs = np.asarray(obs_values, dtype=float)
+    valid = np.isfinite(obs)
+    weights = np.ones(len(obs), dtype=float)
+
+    if np.sum(valid) >= 20:
+        q90 = np.nanquantile(obs[valid], float(cfg.get("tail_weight_q90_quantile", 0.90)))
+        q95 = np.nanquantile(obs[valid], float(cfg.get("tail_weight_q95_quantile", 0.95)))
+        q99 = np.nanquantile(obs[valid], float(cfg.get("tail_weight_q99_quantile", 0.99)))
+        weights[valid & (obs >= q90)] = cfg_float(cfg, "tail_weight_q90", 2.0)
+        weights[valid & (obs >= q95)] = cfg_float(cfg, "tail_weight_q95", 3.0)
+        weights[valid & (obs >= q99)] = cfg_float(cfg, "tail_weight_q99", 5.0)
+
+    return weights.astype(dtype, copy=False)
