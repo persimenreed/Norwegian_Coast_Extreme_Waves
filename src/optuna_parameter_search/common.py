@@ -125,6 +125,44 @@ def compute_tail_rmse(y_true, y_pred, q=0.95):
     return compute_rmse(y_true[tail], y_pred[tail])
 
 
+def suggest_guided_quantile_residual_params(
+    trial,
+    *,
+    min_scale_choices=(0.0, 0.1, 0.15, 0.2, 0.25, 0.35),
+):
+    tail_pool_start = trial.suggest_categorical(
+        "tail_pool_start",
+        [0.90, 0.95, 0.97],
+    )
+    tail_pool_end = trial.suggest_categorical(
+        "tail_pool_end",
+        [0.99, 0.995, 0.999],
+    )
+    tail_residual_end = trial.suggest_categorical(
+        "tail_residual_end",
+        [0.995, 0.999],
+    )
+
+    if tail_pool_end <= tail_pool_start or tail_residual_end < tail_pool_end:
+        raise optuna.exceptions.TrialPruned()
+
+    return {
+        "tail_pool_enabled": True,
+        "tail_pool_start": tail_pool_start,
+        "tail_pool_end": tail_pool_end,
+        "tail_blend_start": tail_pool_start,
+        "tail_monotone": True,
+        "tail_residual_protection_enabled": True,
+        "tail_residual_protection_mode": "sign_aware",
+        "tail_residual_start": tail_pool_start,
+        "tail_residual_end": tail_residual_end,
+        "tail_residual_min_scale": trial.suggest_categorical(
+            "tail_residual_min_scale",
+            list(min_scale_choices),
+        ),
+    }
+
+
 # ---------------------------------------------------------
 # Combined metric emphasizing extremes
 # ---------------------------------------------------------

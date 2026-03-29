@@ -119,10 +119,12 @@ def chronological_train_val_split(
 
 def gumbel_quantile_grid(n=401, p_min=1e-3, p_max=0.999):
     n = max(int(n), 3)
-    p = np.linspace(0.0, 1.0, n, dtype=float)
-    g = -np.log(-np.log(np.clip(p, 1e-6, 1.0 - 1e-6)))
-    g = (g - g.min()) / max(g.max() - g.min(), 1e-8)
-    out = float(p_min) + g * (float(p_max) - float(p_min))
+    p_min = float(p_min)
+    p_max = float(p_max)
+    g_min = -np.log(-np.log(np.clip(p_min, 1e-6, 1.0 - 1e-6)))
+    g_max = -np.log(-np.log(np.clip(p_max, 1e-6, 1.0 - 1e-6)))
+    g = np.linspace(g_min, g_max, n, dtype=float)
+    out = np.exp(-np.exp(-g))
     return np.unique(np.clip(out, p_min, p_max)).astype(np.float32)
 
 
@@ -154,12 +156,123 @@ def empirical_percentiles(values, reference_values=None, p_min=1e-3, p_max=0.999
     return out
 
 
+def stabilize_quantile_mapping_tail(
+    source_quantiles,
+    target_quantiles,
+    probabilities,
+    *,
+    enabled=False,
+    blend_start=0.95,
+    pool_start=0.95,
+    pool_end=0.995,
+    monotone=True,
+):
+    qs = np.asarray(source_quantiles, dtype=np.float32)
+    qt = np.asarray(target_quantiles, dtype=np.float32)
+    probs = np.asarray(probabilities, dtype=np.float32)
+
+    bias = (qt - qs).astype(np.float32)
+    meta = {
+        "right_tail_bias": float(bias[-1]) if len(bias) else 0.0,
+        "right_tail_bias_slope": 0.0,
+        "tail_bias_pool": np.nan,
+    }
+
+    if not enabled or len(probs) < 5:
+        return qt, meta
+
+    pool_start = float(pool_start)
+    pool_end = float(pool_end)
+    blend_start = float(blend_start)
+
+    pool_mask = (probs >= pool_start) & (probs <= pool_end)
+    if np.sum(pool_mask) < 3:
+        return qt, meta
+
+    tail_bias = bias[pool_mask].astype(np.float64)
+    tail_probs = probs[pool_mask].astype(np.float64)
+    ramp = tail_probs - tail_probs.min()
+    weights = 1.0 + ramp / max(tail_probs.max() - tail_probs.min(), 1e-6)
+    pooled_bias = float(np.average(tail_bias, weights=weights))
+
+    tail_mask = probs >= blend_start
+    if not np.any(tail_mask):
+        meta["tail_bias_pool"] = pooled_bias
+        return qt, meta
+
+    alpha = np.clip(
+        (probs[tail_mask] - blend_start) / max(pool_end - blend_start, 1e-6),
+        0.0,
+        1.0,
+    ).astype(np.float32)
+    bias_tail = ((1.0 - alpha) * bias[tail_mask] + alpha * pooled_bias).astype(np.float32)
+
+    if monotone:
+        if pooled_bias >= 0.0:
+            bias_tail = np.maximum.accumulate(bias_tail)
+        else:
+            bias_tail = np.minimum.accumulate(bias_tail)
+
+    bias[tail_mask] = bias_tail
+    qt_adj = (qs + bias).astype(np.float32)
+
+    meta["right_tail_bias"] = float(bias_tail[-1])
+    meta["tail_bias_pool"] = pooled_bias
+    return qt_adj, meta
+
+
+def map_quantiles_by_value(values, mapping, mode="additive", eps=1e-4):
+    x = np.asarray(values, dtype=float)
+    out = np.full(len(x), np.nan, dtype=np.float32)
+
+    qs = np.asarray(mapping["source_quantiles"], dtype=float)
+    qt = np.asarray(mapping["target_quantiles"], dtype=float)
+    if len(qs) < 2 or len(qt) < 2:
+        return out
+
+    m = np.isfinite(x)
+    if not np.any(m):
+        return out
+
+    xv = x[m]
+    yv = np.interp(xv, qs, qt).astype(np.float32)
+
+    left_mask = xv < qs[0]
+    if np.any(left_mask):
+        dx = qs[1] - qs[0]
+        slope = 0.0 if abs(dx) < 1e-8 else (qt[1] - qt[0]) / dx
+        yv[left_mask] = (qt[0] + slope * (xv[left_mask] - qs[0])).astype(np.float32)
+
+    right_mask = xv > qs[-1]
+    if np.any(right_mask):
+        mode = str(mode).strip().lower()
+        if mode == "additive":
+            bias_end = float(mapping.get("right_tail_bias", qt[-1] - qs[-1]))
+            bias_slope = float(mapping.get("right_tail_bias_slope", 0.0))
+            dx = xv[right_mask] - qs[-1]
+            yv[right_mask] = (xv[right_mask] + bias_end + bias_slope * dx).astype(np.float32)
+        elif mode == "log_ratio":
+            safe_qs = max(qs[-1] + float(eps), float(eps))
+            safe_qt = max(qt[-1] + float(eps), float(eps))
+            log_ratio = np.log(safe_qt) - np.log(safe_qs)
+            yv[right_mask] = (
+                np.exp(np.log(np.maximum(xv[right_mask] + float(eps), float(eps))) + log_ratio)
+                - float(eps)
+            ).astype(np.float32)
+        else:
+            raise ValueError(f"Unsupported quantile mapping mode: {mode}")
+
+    out[m] = yv
+    return clip_nonnegative(out).astype(np.float32)
+
+
 def build_quantile_bias_mapping(
     source_values,
     target_values,
     n_quantiles=401,
     p_min=1e-3,
     p_max=0.999,
+    tail_cfg=None,
 ):
     source = np.asarray(source_values, dtype=float)
     target = np.asarray(target_values, dtype=float)
@@ -172,11 +285,26 @@ def build_quantile_bias_mapping(
     qs = np.quantile(source[valid], probs).astype(np.float32)
     qt = np.quantile(target[valid], probs).astype(np.float32)
 
+    tail_cfg = tail_cfg or {}
+    qt, tail_meta = stabilize_quantile_mapping_tail(
+        qs,
+        qt,
+        probs,
+        enabled=bool(tail_cfg.get("tail_pool_enabled", False)),
+        blend_start=float(tail_cfg.get("tail_blend_start", 0.95)),
+        pool_start=float(tail_cfg.get("tail_pool_start", 0.95)),
+        pool_end=float(tail_cfg.get("tail_pool_end", 0.995)),
+        monotone=bool(tail_cfg.get("tail_monotone", True)),
+    )
+
     return {
         "probabilities": probs.astype(np.float32),
         "source_quantiles": qs,
         "target_quantiles": qt,
         "additive_bias": (qt - qs).astype(np.float32),
+        "right_tail_bias": float(tail_meta.get("right_tail_bias", (qt - qs)[-1])),
+        "right_tail_bias_slope": float(tail_meta.get("right_tail_bias_slope", 0.0)),
+        "tail_bias_pool": float(tail_meta.get("tail_bias_pool", np.nan)),
         "p_min": float(p_min),
         "p_max": float(p_max),
     }
@@ -231,21 +359,20 @@ def quantile_bias_features(
         p_min=float(mapping.get("p_min", 1e-3)),
         p_max=float(mapping.get("p_max", 0.999)),
     )
-    bias = quantile_bias_from_percentiles(pct, mapping, mode=mode, eps=eps)
-
-    baseline = np.full(len(x), np.nan, dtype=np.float32)
-    m = np.isfinite(x) & np.isfinite(bias)
+    baseline = map_quantiles_by_value(x, mapping, mode=mode, eps=eps)
+    bias = np.full(len(x), np.nan, dtype=np.float32)
+    m = np.isfinite(x) & np.isfinite(baseline)
 
     mode = str(mode).strip().lower()
     if mode == "additive":
-        baseline[m] = (x[m] + bias[m]).astype(np.float32)
+        bias[m] = (baseline[m] - x[m]).astype(np.float32)
     elif mode == "log_ratio":
-        safe = np.maximum(x[m] + float(eps), float(eps))
-        baseline[m] = (np.exp(np.log(safe) + bias[m]) - float(eps)).astype(np.float32)
+        safe_x = np.maximum(x[m] + float(eps), float(eps))
+        safe_base = np.maximum(baseline[m] + float(eps), float(eps))
+        bias[m] = (np.log(safe_base) - np.log(safe_x)).astype(np.float32)
     else:
         raise ValueError(f"Unsupported quantile bias mode: {mode}")
 
-    baseline = clip_nonnegative(baseline).astype(np.float32)
     return {
         HS_QUANTILE: pct.astype(np.float32),
         HS_QUANTILE_BIAS: bias.astype(np.float32),
@@ -281,6 +408,7 @@ def build_target_transform(obs_values, raw_values, cfg):
             n_quantiles=int(cfg.get("quantile_grid_size", 401)),
             p_min=float(cfg.get("quantile_p_min", 1e-3)),
             p_max=float(cfg.get("quantile_p_max", 0.999)),
+            tail_cfg=cfg,
         )
         extras = quantile_bias_features(
             raw,
@@ -300,6 +428,19 @@ def build_target_transform(obs_values, raw_values, cfg):
                 "eps": float(eps),
                 "quantile_mapping": qmap,
                 "quantile_bias_mode": cfg_str(cfg, "quantile_bias_mode", "additive"),
+                "tail_residual_protection_enabled": bool(
+                    cfg.get("tail_residual_protection_enabled", False)
+                ),
+                "tail_residual_protection_mode": cfg_str(
+                    cfg,
+                    "tail_residual_protection_mode",
+                    "sign_aware",
+                ),
+                "tail_residual_start": float(cfg.get("tail_residual_start", 0.95)),
+                "tail_residual_end": float(cfg.get("tail_residual_end", 0.999)),
+                "tail_residual_min_scale": float(
+                    cfg.get("tail_residual_min_scale", 0.25)
+                ),
             },
         )
 
@@ -337,6 +478,52 @@ def invert_target(pred_target, base_values, transform_cfg):
         return clip_nonnegative(corrected)
 
     raise ValueError(f"Unsupported inverse target transform: {mode}")
+
+
+def protect_tail_residuals(pred_target, percentiles, transform_cfg):
+    pred = np.asarray(pred_target, dtype=np.float32).copy()
+    pct = np.asarray(percentiles, dtype=np.float32)
+
+    if not bool(transform_cfg.get("tail_residual_protection_enabled", False)):
+        return pred
+
+    start = float(transform_cfg.get("tail_residual_start", 0.95))
+    end = float(transform_cfg.get("tail_residual_end", 0.999))
+    min_scale = float(transform_cfg.get("tail_residual_min_scale", 0.25))
+    mode = str(
+        transform_cfg.get("tail_residual_protection_mode", "sign_aware")
+    ).strip().lower()
+    min_scale = min(max(min_scale, 0.0), 1.0)
+
+    m = np.isfinite(pred) & np.isfinite(pct)
+    if not np.any(m):
+        return pred
+
+    if mode == "negative_only":
+        m = m & (pred < 0.0)
+    elif mode == "positive_only":
+        m = m & (pred > 0.0)
+    elif mode == "symmetric":
+        pass
+    else:
+        qmap = transform_cfg.get("quantile_mapping", {}) or {}
+        tail_bias = qmap.get("tail_bias_pool", np.nan)
+        if not np.isfinite(tail_bias):
+            tail_bias = qmap.get("right_tail_bias", np.nan)
+        if not np.isfinite(tail_bias) or abs(float(tail_bias)) < 1e-8:
+            return pred
+        if float(tail_bias) > 0.0:
+            m = m & (pred < 0.0)
+        else:
+            m = m & (pred > 0.0)
+
+    if not np.any(m):
+        return pred
+
+    alpha = np.clip((pct[m] - start) / max(end - start, 1e-6), 0.0, 1.0)
+    scale = 1.0 - alpha * (1.0 - min_scale)
+    pred[m] = (pred[m] * scale).astype(np.float32)
+    return pred
 
 
 def build_tail_sample_weights(obs_values, cfg, dtype=np.float32):

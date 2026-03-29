@@ -11,7 +11,8 @@ import optuna
 from src.bias_correction.methods import xgboost
 from src.optuna_parameter_search.common import (
     evaluate_cv,
-    EarlyStoppingCallback
+    EarlyStoppingCallback,
+    suggest_guided_quantile_residual_params,
 )
 from src.settings import get_core_buoy_locations
 
@@ -75,7 +76,14 @@ def make_objective(source, settings_name, target_transform):
             "random_state": 1
         }
 
-        if target_transform != "quantile_residual":
+        if target_transform == "quantile_residual":
+            params.update(
+                suggest_guided_quantile_residual_params(
+                    trial,
+                    min_scale_choices=(0.0, 0.1, 0.15, 0.2, 0.25, 0.35),
+                )
+            )
+        else:
             params["target_eps"] = trial.suggest_categorical(
                 "target_eps", [1e-6, 1e-5, 1e-4, 1e-3]
             )
@@ -131,7 +139,10 @@ def main():
         )
 
     settings_name = f"xgboost_{args.source}"
-    study_name = f"xgboost_{args.source}_local_cv"
+    if args.target_transform == "quantile_residual":
+        study_name = f"xgboost_{args.source}_local_cv_guided_tail_v1"
+    else:
+        study_name = f"xgboost_{args.source}_local_cv_{args.target_transform}"
 
     study = optuna.create_study(
         direction="minimize",

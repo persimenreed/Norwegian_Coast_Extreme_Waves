@@ -13,6 +13,7 @@ from src.bias_correction.methods.common import (
     augment_quantile_features,
     build_target_transform,
     invert_target,
+    protect_tail_residuals,
     build_tail_sample_weights,
 )
 
@@ -142,12 +143,16 @@ def apply(df, bundle):
             reference_values=raw,
         )
         base_values = extras[HS_QUANTILE_BASELINE]
+        quantiles = extras["hs_quantile"]
     else:
         base_values = pd.to_numeric(prepared[HS_MODEL], errors="coerce").values.astype(np.float32)
+        quantiles = None
 
     X, _ = _prepare_features(prepared, bundle["features"], bundle["fill"])
 
     residual = bundle["model"].predict(X)
+    if quantiles is not None:
+        residual = protect_tail_residuals(residual, quantiles, transform_cfg)
     prepared[HS_MODEL] = invert_target(
         residual,
         base_values,

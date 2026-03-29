@@ -19,6 +19,7 @@ from src.bias_correction.methods.common import (
     augment_quantile_features,
     build_target_transform,
     invert_target,
+    protect_tail_residuals,
     build_tail_sample_weights,
 )
 
@@ -542,8 +543,10 @@ def apply(df, bundle):
             reference_values=hs,
         )
         base_values = extras[HS_QUANTILE_BASELINE]
+        quantiles = extras["hs_quantile"]
     else:
         base_values = hs
+        quantiles = None
 
     X = _scale_features(
         prep,
@@ -569,6 +572,9 @@ def apply(df, bundle):
         device = _resolve_device()
         model = bundle["model"].to(device).eval()
         pred_target[end_idx] = _predict(model, X_seq, batch_size=256, device=device)
+
+    if quantiles is not None:
+        pred_target = protect_tail_residuals(pred_target, quantiles, transform_cfg)
 
     corrected = hs.copy()
     restored = invert_target(pred_target, base_values, transform_cfg)
