@@ -7,7 +7,9 @@ import pandas as pd
 from src.settings import get_method_settings
 from src.bias_correction.methods.common import (
     TIME, HS_MODEL, HS_OBS,
+    HS_QUANTILE, HS_QUANTILE_BIAS, HS_QUANTILE_BASELINE,
     prepare_ml_dataframe, resolve_feature_columns, clip_nonnegative,
+    build_quantile_bias_mapping, quantile_bias_features,
 )
 
 try:
@@ -56,6 +58,28 @@ def _cfg_float(cfg, key, default):
 
 def _cfg_str(cfg, key, default):
     return str(cfg.get(key, default))
+
+
+def _quantile_feature_columns(features):
+    out = list(features)
+    for col in (HS_QUANTILE, HS_QUANTILE_BIAS, HS_QUANTILE_BASELINE):
+        if col not in out:
+            out.append(col)
+    return out
+
+
+def _augment_quantile_features(df, raw_values, transform_cfg, reference_values=None):
+    out = df.copy()
+    extras = quantile_bias_features(
+        raw_values,
+        transform_cfg["quantile_mapping"],
+        reference_values=reference_values if reference_values is not None else raw_values,
+        mode=transform_cfg.get("quantile_bias_mode", "additive"),
+        eps=float(transform_cfg.get("eps", 1e-4)),
+    )
+    for col, values in extras.items():
+        out[col] = values
+    return out, extras
 
 
 # ── feature scaling ──────────────────────────────────────────────────────────
@@ -148,6 +172,35 @@ def _build_target(obs_values, raw_values, cfg):
     mode = _cfg_str(cfg, "target_transform", "log_ratio").strip().lower()
     eps = np.float32(_cfg_float(cfg, "target_eps", 1e-4))
 
+    if mode == "quantile_residual":
+        qmap = build_quantile_bias_mapping(
+            raw,
+            obs,
+            n_quantiles=int(cfg.get("quantile_grid_size", 401)),
+            p_min=float(cfg.get("quantile_p_min", 1e-3)),
+            p_max=float(cfg.get("quantile_p_max", 0.999)),
+        )
+        extras = quantile_bias_features(
+            raw,
+            qmap,
+            reference_values=raw,
+            mode=_cfg_str(cfg, "quantile_bias_mode", "additive"),
+            eps=float(eps),
+        )
+        baseline = extras[HS_QUANTILE_BASELINE]
+        y = obs - baseline
+        valid = np.isfinite(obs) & np.isfinite(baseline)
+        return (
+            y.astype(np.float32),
+            valid,
+            {
+                "mode": mode,
+                "eps": float(eps),
+                "quantile_mapping": qmap,
+                "quantile_bias_mode": _cfg_str(cfg, "quantile_bias_mode", "additive"),
+            },
+        )
+
     if mode == "additive_residual":
         y = obs - raw
         valid = np.isfinite(obs) & np.isfinite(raw)
@@ -162,26 +215,26 @@ def _build_target(obs_values, raw_values, cfg):
     raise ValueError(f"Unsupported target_transform: {mode}")
 
 
-def _invert_target(pred_target, raw_values, transform_cfg):
+def _invert_target(pred_target, base_values, transform_cfg):
     """
     Convert predicted target back to corrected Hs.
     """
     pred = np.asarray(pred_target, dtype=np.float32)
-    raw = np.asarray(raw_values, dtype=np.float32)
+    base = np.asarray(base_values, dtype=np.float32)
 
     mode = str(transform_cfg.get("mode", "log_ratio")).strip().lower()
     eps = np.float32(float(transform_cfg.get("eps", 1e-4)))
 
-    corrected = np.full(len(raw), np.nan, dtype=np.float32)
+    corrected = np.full(len(base), np.nan, dtype=np.float32)
 
-    if mode == "additive_residual":
-        m = np.isfinite(raw) & np.isfinite(pred)
-        corrected[m] = raw[m] + pred[m]
+    if mode in {"additive_residual", "quantile_residual"}:
+        m = np.isfinite(base) & np.isfinite(pred)
+        corrected[m] = base[m] + pred[m]
         return clip_nonnegative(corrected)
 
     if mode == "log_ratio":
-        m = np.isfinite(raw) & np.isfinite(pred) & (raw > -eps)
-        corrected[m] = np.exp(np.log(raw[m] + eps) + pred[m]) - eps
+        m = np.isfinite(base) & np.isfinite(pred) & (base > -eps)
+        corrected[m] = np.exp(np.log(base[m] + eps) + pred[m]) - eps
         return clip_nonnegative(corrected)
 
     raise ValueError(f"Unsupported inverse target transform: {mode}")
@@ -249,21 +302,21 @@ def _loader(
     seed,
     weights=None,
     obs_values=None,
-    raw_values=None,
+    base_values=None,
 ):
     if weights is None:
         weights = np.ones(len(y), dtype=np.float32)
     if obs_values is None:
         obs_values = np.zeros(len(y), dtype=np.float32)
-    if raw_values is None:
-        raw_values = np.zeros(len(y), dtype=np.float32)
+    if base_values is None:
+        base_values = np.zeros(len(y), dtype=np.float32)
 
     ds = TensorDataset(
         torch.from_numpy(x),
         torch.from_numpy(y),
         torch.from_numpy(np.asarray(weights, dtype=np.float32)),
         torch.from_numpy(np.asarray(obs_values, dtype=np.float32)),
-        torch.from_numpy(np.asarray(raw_values, dtype=np.float32)),
+        torch.from_numpy(np.asarray(base_values, dtype=np.float32)),
     )
     gen = torch.Generator()
     gen.manual_seed(seed)
@@ -318,23 +371,23 @@ def _weighted_mean(values, weights):
     return weighted.sum() / denom
 
 
-def _invert_target_torch(pred_target, raw_values, transform_cfg):
+def _invert_target_torch(pred_target, base_values, transform_cfg):
     mode = str(transform_cfg.get("mode", "log_ratio")).strip().lower()
     eps = float(transform_cfg.get("eps", 1e-4))
 
-    if mode == "additive_residual":
-        corrected = raw_values + pred_target
+    if mode in {"additive_residual", "quantile_residual"}:
+        corrected = base_values + pred_target
         return torch.clamp(corrected, min=0.0)
 
     if mode == "log_ratio":
-        safe_raw = torch.clamp(raw_values + eps, min=eps)
-        corrected = torch.exp(torch.log(safe_raw) + pred_target) - eps
+        safe_base = torch.clamp(base_values + eps, min=eps)
+        corrected = torch.exp(torch.log(safe_base) + pred_target) - eps
         return torch.clamp(corrected, min=0.0)
 
     raise ValueError(f"Unsupported inverse target transform: {mode}")
 
 
-def _mixed_loss(pred, target, sample_weights, obs_values, raw_values, transform_cfg, cfg):
+def _mixed_loss(pred, target, sample_weights, obs_values, base_values, transform_cfg, cfg):
     """
     Tail-aware dual-space loss:
       1. keep the transformed-target fit stable
@@ -342,7 +395,7 @@ def _mixed_loss(pred, target, sample_weights, obs_values, raw_values, transform_
     """
     target_loss = _weighted_mean((pred - target) ** 2, sample_weights)
 
-    pred_hs = _invert_target_torch(pred, raw_values, transform_cfg)
+    pred_hs = _invert_target_torch(pred, base_values, transform_cfg)
     true_hs = torch.clamp(obs_values, min=0.0)
     physical_loss = _weighted_mean((pred_hs - true_hs) ** 2, sample_weights)
 
@@ -373,13 +426,26 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
 
     work = prepare_ml_dataframe(work)
 
-    features = resolve_feature_columns(work, cfg.get("features", []))
-    seq_len = _cfg_int(cfg, "sequence_length", 24)
-
     obs_values = pd.to_numeric(work[HS_OBS], errors="coerce").to_numpy(np.float32)
     raw_values = pd.to_numeric(work[HS_MODEL], errors="coerce").to_numpy(np.float32)
 
     y, valid_target, transform_cfg = _build_target(obs_values, raw_values, cfg)
+
+    if transform_cfg["mode"] == "quantile_residual":
+        work, quantile_extras = _augment_quantile_features(
+            work,
+            raw_values,
+            transform_cfg,
+            reference_values=raw_values,
+        )
+    else:
+        quantile_extras = None
+
+    features = resolve_feature_columns(work, cfg.get("features", []))
+    if transform_cfg["mode"] == "quantile_residual":
+        features = _quantile_feature_columns(features)
+
+    seq_len = _cfg_int(cfg, "sequence_length", 24)
     pos = np.flatnonzero(valid_target)
 
     min_train = _cfg_int(cfg, "min_train_samples", 80)
@@ -422,10 +488,15 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
         X, y, seg, seq_len, _target_mask(val_pos)
     )
 
+    if transform_cfg["mode"] == "quantile_residual":
+        base_values = quantile_extras[HS_QUANTILE_BASELINE]
+    else:
+        base_values = raw_values
+
     train_obs = obs_values[train_end_idx]
-    train_raw = raw_values[train_end_idx]
+    train_base = base_values[train_end_idx]
     val_obs = obs_values[val_end_idx] if len(val_end_idx) else np.zeros(0, dtype=np.float32)
-    val_raw = raw_values[val_end_idx] if len(val_end_idx) else np.zeros(0, dtype=np.float32)
+    val_base = base_values[val_end_idx] if len(val_end_idx) else np.zeros(0, dtype=np.float32)
 
     train_weights = _tail_sample_weights(train_obs, cfg)
     val_weights = _tail_sample_weights(val_obs, cfg) if len(val_obs) else np.zeros(0, dtype=np.float32)
@@ -466,7 +537,7 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
         seed=seed,
         weights=train_weights,
         obs_values=train_obs,
-        raw_values=train_raw,
+        base_values=train_base,
     )
 
     val_dl = (
@@ -479,7 +550,7 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
             seed=seed,
             weights=val_weights,
             obs_values=val_obs,
-            raw_values=val_raw,
+            base_values=val_base,
         )
         if len(X_val)
         else None
@@ -496,16 +567,16 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
 
         model.train()
 
-        for xb, yb, wb, ob, rb in train_dl:
+        for xb, yb, wb, ob, bb in train_dl:
             xb = xb.to(device, non_blocking=use_cuda).contiguous()
             yb = yb.to(device, non_blocking=use_cuda)
             wb = wb.to(device, non_blocking=use_cuda)
             ob = ob.to(device, non_blocking=use_cuda)
-            rb = rb.to(device, non_blocking=use_cuda)
+            bb = bb.to(device, non_blocking=use_cuda)
 
             optimizer.zero_grad(set_to_none=True)
             pred = model(xb)
-            loss = _mixed_loss(pred, yb, wb, ob, rb, transform_cfg, cfg)
+            loss = _mixed_loss(pred, yb, wb, ob, bb, transform_cfg, cfg)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -515,15 +586,15 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
             model.eval()
             with torch.no_grad():
                 val_losses = []
-                for xb, yb, wb, ob, rb in val_dl:
+                for xb, yb, wb, ob, bb in val_dl:
                     xb = xb.to(device, non_blocking=use_cuda).contiguous()
                     yb = yb.to(device, non_blocking=use_cuda)
                     wb = wb.to(device, non_blocking=use_cuda)
                     ob = ob.to(device, non_blocking=use_cuda)
-                    rb = rb.to(device, non_blocking=use_cuda)
+                    bb = bb.to(device, non_blocking=use_cuda)
 
                     pred = model(xb)
-                    vloss = _mixed_loss(pred, yb, wb, ob, rb, transform_cfg, cfg)
+                    vloss = _mixed_loss(pred, yb, wb, ob, bb, transform_cfg, cfg)
                     val_losses.append(vloss.item())
 
                 vloss = float(np.mean(val_losses)) if val_losses else np.inf
@@ -587,6 +658,20 @@ def apply(df, bundle):
         out["_orig_index"] = np.arange(len(out))
 
     prep = prepare_ml_dataframe(out.copy())
+    hs = pd.to_numeric(prep[HS_MODEL], errors="coerce").to_numpy(np.float32)
+    transform_cfg = bundle["target_transform"]
+
+    if transform_cfg["mode"] == "quantile_residual":
+        prep, extras = _augment_quantile_features(
+            prep,
+            hs,
+            transform_cfg,
+            reference_values=hs,
+        )
+        base_values = extras[HS_QUANTILE_BASELINE]
+    else:
+        base_values = hs
+
     X = _scale_features(
         prep,
         bundle["features"],
@@ -594,8 +679,6 @@ def apply(df, bundle):
         bundle["mean"],
         bundle["std"],
     )
-
-    hs = pd.to_numeric(prep[HS_MODEL], errors="coerce").to_numpy(np.float32)
 
     src_col = "source" if "source" in prep.columns else None
     seg = _segment_ids(prep, TIME, source_col=src_col)
@@ -615,7 +698,7 @@ def apply(df, bundle):
         pred_target[end_idx] = _predict(model, X_seq, batch_size=256, device=device)
 
     corrected = hs.copy()
-    restored = _invert_target(pred_target, hs, bundle["target_transform"])
+    restored = _invert_target(pred_target, base_values, transform_cfg)
     m = np.isfinite(restored)
     corrected[m] = restored[m]
     prep[HS_MODEL] = clip_nonnegative(corrected)

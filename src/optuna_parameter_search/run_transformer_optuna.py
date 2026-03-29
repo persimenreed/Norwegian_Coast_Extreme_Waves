@@ -83,9 +83,6 @@ def make_objective(source, settings_name, target_transform):
                 "batch_size", [32, 64, 128, 256]
             ),
             "target_transform": target_transform,
-            "target_eps": trial.suggest_categorical(
-                "target_eps", [1e-6, 1e-5, 1e-4, 1e-3]
-            ),
             "tail_weight_q90": tail_weight_q90,
             "tail_weight_q95": tail_weight_q95,
             "tail_weight_q99": tail_weight_q99,
@@ -93,6 +90,11 @@ def make_objective(source, settings_name, target_transform):
             "physical_space_loss_weight": physical_space_loss_weight,
             "random_state": 1,
         }
+
+        if target_transform != "quantile_residual":
+            params["target_eps"] = trial.suggest_categorical(
+                "target_eps", [1e-6, 1e-5, 1e-4, 1e-3]
+            )
 
         try:
             return evaluate_cv(
@@ -163,11 +165,11 @@ def main():
     )
     parser.add_argument(
         "--target-transform",
-        default="log_ratio",
-        choices=["log_ratio", "additive_residual"],
+        default="quantile_residual",
+        choices=["log_ratio", "additive_residual", "quantile_residual"],
         help=(
             "Training target transform to optimize. "
-            "Use 'log_ratio' for the new tail-focused setup."
+            "Use 'quantile_residual' to learn residuals around a quantile-bias baseline."
         ),
     )
 
