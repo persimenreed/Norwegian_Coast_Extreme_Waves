@@ -75,7 +75,7 @@ def plot_model(df, location, model, datasets, ymin):
     plt.title(f"{model} return levels — {location}")
     plt.grid(True, alpha=0.3)
     plt.legend()
-    plt.xlim(1, 50)
+    plt.xlim(1, 100)
 
     bottom = YMIN_FLOOR if ymin is None else max(YMIN_FLOOR, ymin)
     plt.ylim(bottom=bottom)

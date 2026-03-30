@@ -10,6 +10,7 @@ from matplotlib.patches import Patch
 SUMMARY_ROOT = Path("results/extreme_value_modelling")
 RESULT_DIR = Path("results/extreme_value_analysis/return_level")
 RETURN_PERIODS = [10.0, 20.0, 50.0]
+RETURN_PERIOD_100 = [100.0]
 
 
 def load_summary(location):
@@ -37,7 +38,7 @@ def dataset_label(d):
 
 
 
-def plot_location(location, datasets, output_name=None):
+def plot_location(location, datasets, return_periods=RETURN_PERIODS, output_name=None):
     df = load_summary(location)
 
     # Keep a preferred order for key ensemble comparisons, then stable fallback order.
@@ -64,9 +65,9 @@ def plot_location(location, datasets, output_name=None):
         ),
     )
 
-    fig_width = max(11, 2.5 * len(ordered_datasets) + 4.5)
-    fig, axes = plt.subplots(1, len(RETURN_PERIODS), figsize=(fig_width, 5.2), sharey=True)
-    if len(RETURN_PERIODS) == 1:
+    fig_width = max(8 if len(return_periods) == 1 else 11, 2.5 * len(ordered_datasets) + 4.5)
+    fig, axes = plt.subplots(1, len(return_periods), figsize=(fig_width, 5.2), sharey=True)
+    if len(return_periods) == 1:
         axes = [axes]
 
     cmap = plt.get_cmap("tab10")
@@ -77,7 +78,7 @@ def plot_location(location, datasets, output_name=None):
     x_gev = np.arange(n, dtype=float)
     x_gpd = x_gev + n + group_gap
 
-    for ax, rp in zip(axes, RETURN_PERIODS):
+    for ax, rp in zip(axes, return_periods):
         gev_vals, gev_err_lo, gev_err_hi = [], [], []
         gpd_vals, gpd_err_lo, gpd_err_hi = [], [], []
 
@@ -228,7 +229,8 @@ def plot_location(location, datasets, output_name=None):
     if output_name:
         out_path = RESULT_DIR / location / output_name
     else:
-        out_path = RESULT_DIR / location / f"{location}_gev_gpd_return_level_bars.png"
+        suffix = "100yr" if len(return_periods) == 1 and np.isclose(return_periods[0], 100.0) else "bars"
+        out_path = RESULT_DIR / location / f"{location}_gev_gpd_return_level_{suffix}.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout(rect=(0, 0, 1, 0.95), w_pad=0.4)
     plt.savefig(out_path, dpi=300)
@@ -249,6 +251,12 @@ def main():
     args = parser.parse_args()
 
     plot_location(args.location, args.datasets, output_name=args.output_name)
+    plot_location(
+        args.location,
+        args.datasets,
+        return_periods=RETURN_PERIOD_100,
+        output_name=f"{args.location}_gev_gpd_return_level_100yr.png",
+    )
 
 
 if __name__ == "__main__":

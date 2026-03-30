@@ -59,7 +59,7 @@ BIAS_CORRECTION/output
 *.nc
 *.parquet
 *.csv
-optuna*
+.db
 TESTING*
 TMP*
 SPATIAL_VISUALIZATION
