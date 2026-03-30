@@ -8,11 +8,34 @@ from src.bias_correction.methods.common import (
     resolve_feature_columns,
 )
 from src.ensemble.common import OBS, member_column
-from src.settings import get_method_settings
+from src.model_profiles import resolve_profile
+
+DEFAULT_ENSEMBLE_XGBOOST_CONFIG = {
+    "tail_weight_q90": 2.0,
+    "tail_weight_q95": 3.0,
+    "tail_weight_q99": 4.0,
+    "n_estimators": 300,
+    "max_depth": 4,
+    "learning_rate": 0.05,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "gamma": 0.0,
+    "min_child_weight": 1.0,
+    "reg_alpha": 0.0,
+    "reg_lambda": 1.0,
+    "tail_aware": True,
+    "tail_strength_q95": 0.20,
+    "tail_strength_q99": 0.50,
+    "random_state": 1,
+}
 
 
-def _sample_weights(obs, settings_name="ensemble_xgboost"):
-    cfg = get_method_settings(settings_name) or get_method_settings("ensemble_xgboost")
+def _config(profile_name="ensemble_xgboost"):
+    return resolve_profile(DEFAULT_ENSEMBLE_XGBOOST_CONFIG, "ensemble_xgboost", profile_name)
+
+
+def _sample_weights(obs, profile_name="ensemble_xgboost"):
+    cfg = _config(profile_name)
     obs = np.asarray(obs, dtype=float)
     weights = np.ones(len(obs), dtype=float)
     valid = np.isfinite(obs)
@@ -127,8 +150,8 @@ def _build_targets(df, methods):
     return valid, soft_targets, dominant, obs
 
 
-def _common_xgb_params(settings_name="ensemble_xgboost"):
-    cfg = get_method_settings(settings_name) or get_method_settings("ensemble_xgboost")
+def _common_xgb_params(profile_name="ensemble_xgboost"):
+    cfg = _config(profile_name)
     return {
         "n_estimators": int(cfg.get("n_estimators", 300)),
         "max_depth": int(cfg.get("max_depth", 4)),
@@ -146,8 +169,8 @@ def _common_xgb_params(settings_name="ensemble_xgboost"):
     }
 
 
-def _tail_aware_config(df, settings_name="ensemble_xgboost"):
-    cfg = get_method_settings(settings_name) or get_method_settings("ensemble_xgboost")
+def _tail_aware_config(df, profile_name="ensemble_xgboost"):
+    cfg = _config(profile_name)
 
     raw = pd.to_numeric(df.get(RAW_MODEL), errors="coerce").to_numpy(dtype=float)
     valid = raw[np.isfinite(raw)]
@@ -291,7 +314,7 @@ def fit_state_corrected_ensemble(
     df,
     methods,
     state_features=None,
-    settings_name="ensemble_xgboost",
+    profile_name="ensemble_xgboost",
 ):
     try:
         from xgboost import XGBRegressor
@@ -319,7 +342,7 @@ def fit_state_corrected_ensemble(
         "state_feature_names": state_feature_names,
         "gate_fill": gate_fill,
         "gate_feature_names": gate_feature_names,
-        "tail_aware": _tail_aware_config(df, settings_name=settings_name),
+        "tail_aware": _tail_aware_config(df, profile_name=profile_name),
         "mean_target_weights": soft_targets.mean(axis=0).tolist(),
         "class_counts": {
             methods[idx]: int(counts[idx])
@@ -332,7 +355,7 @@ def fit_state_corrected_ensemble(
     }
 
     X_train = X_all[valid_mask]
-    row_weights = _sample_weights(obs[valid_mask], settings_name=settings_name)
+    row_weights = _sample_weights(obs[valid_mask], profile_name=profile_name)
 
     importance_sum = np.zeros(len(gate_feature_names), dtype=float)
     importance_weight = 0.0
@@ -347,7 +370,7 @@ def fit_state_corrected_ensemble(
         gate_model = XGBRegressor(
             objective="reg:squarederror",
             eval_metric="rmse",
-            **_common_xgb_params(settings_name=settings_name),
+            **_common_xgb_params(profile_name=profile_name),
         )
 
         gate_model.fit(

@@ -1,15 +1,11 @@
 import numpy as np
 
 from src.ensemble.common import (
-    available_transfer_member_families,
-    build_member_specs,
     build_oof_predictions,
-    has_corrected_member_specs,
-    has_validation_member_specs,
-    load_hindcast_member_dataset_specs,
-    load_training_validation_specs,
-    load_validation_member_dataset_specs,
-    normalize_methods,
+    load_hindcast_dataset,
+    load_training_validation_data,
+    load_validation_dataset,
+    member_specs_exist,
     save_ensemble_report,
     save_hindcast_output,
     save_validation_output,
@@ -22,23 +18,59 @@ from src.ensemble.xgboost_core import (
 from src.settings import (
     get_core_buoy_locations,
     get_external_validation_buoys,
+    get_methods,
     get_study_area_locations,
-    get_validation_settings,
 )
 
+ENSEMBLE_OOF_FOLDS = 4
 
-def _combined_member_labels(methods):
-    core_buoys = get_core_buoy_locations()
+
+def _selected_methods(methods=None):
+    available = list(get_methods())
+    if methods is None:
+        return available
+
+    selected = []
+    for method in methods:
+        if method not in available:
+            raise ValueError(f"Unknown ensemble member '{method}'. Available methods: {available}")
+        if method not in selected:
+            selected.append(method)
+
+    if not selected:
+        raise ValueError("No valid ensemble members were selected.")
+    return selected
+
+
+def _member_specs(member_family, methods, label_prefix=None):
     return [
-        f"transfer_{source}_{method}"
-        for source in core_buoys
+        {
+            "member_family": member_family,
+            "method": method,
+            "label": f"{label_prefix}_{method}" if label_prefix else method,
+        }
         for method in methods
     ]
 
 
+def _available_transfer_families(location, methods, validation):
+    families = []
+    for source in get_core_buoy_locations():
+        if source == location:
+            continue
+        member_family = f"transfer_{source}"
+        if member_specs_exist(
+            location,
+            _member_specs(member_family, methods, label_prefix=member_family),
+            validation=validation,
+        ):
+            families.append(member_family)
+    return families
+
+
 def _single_source_training_specs(source, methods):
-    member_specs = build_member_specs(["localcv"], methods)
-    if not has_validation_member_specs(source, member_specs):
+    member_specs = _member_specs("localcv", methods)
+    if not member_specs_exist(source, member_specs, validation=True):
         raise ValueError(
             f"No local CV validation datasets were found for ensemble source '{source}'. "
             "Run the local bias-correction stage first."
@@ -58,25 +90,16 @@ def _combined_training_specs(methods):
     specs = []
 
     for source in get_core_buoy_locations():
-        member_specs = [
-            {
-                "member_family": "localcv",
-                "method": method,
-                "label": f"transfer_{source}_{method}",
-            }
-            for method in methods
-        ]
-        if not has_validation_member_specs(source, member_specs):
-            continue
-
-        specs.append(
-            {
-                "location": source,
-                "member_specs": member_specs,
-                "group_label": source,
-                "label": source,
-            }
-        )
+        member_specs = _member_specs("localcv", methods, label_prefix=f"transfer_{source}")
+        if member_specs_exist(source, member_specs, validation=True):
+            specs.append(
+                {
+                    "location": source,
+                    "member_specs": member_specs,
+                    "group_label": source,
+                    "label": source,
+                }
+            )
 
     if not specs:
         raise ValueError(
@@ -87,190 +110,170 @@ def _combined_training_specs(methods):
     return specs
 
 
-def _target_member_specs(location, methods, source=None, combined=False, require_validation=False):
+def build_training_setup(source=None, methods=None):
+    methods = _selected_methods(methods)
+
+    if source is None:
+        training_specs = _combined_training_specs(methods)
+        return {
+            "methods": methods,
+            "source": None,
+            "combined": True,
+            "training_specs": training_specs,
+            "training_members": [
+                spec["label"]
+                for training_spec in training_specs
+                for spec in training_spec["member_specs"]
+            ],
+            "profile_name": "ensemble_xgboost",
+            "study_name": "ensemble_combined_spatial_cv",
+            "default_output_name": "ensemble_combined",
+        }
+
+    if source not in get_core_buoy_locations():
+        raise ValueError(
+            f"Unknown core-buoy source '{source}'. Available: {get_core_buoy_locations()}"
+        )
+
+    return {
+        "methods": methods,
+        "source": source,
+        "combined": False,
+        "training_specs": _single_source_training_specs(source, methods),
+        "training_members": list(methods),
+        "profile_name": f"ensemble_xgboost_{source}",
+        "study_name": f"ensemble_{source}_spatial_cv",
+        "default_output_name": f"ensemble_{source}",
+    }
+
+
+def _target_member_specs(location, methods, source=None, combined=False, validation=False):
     if combined:
-        families = available_transfer_member_families(
-            location,
-            methods,
-            require_validation=require_validation,
-        )
-        return build_member_specs(
-            families,
-            methods,
-            include_family_in_label=True,
-        )
+        specs = []
+        for family in _available_transfer_families(location, methods, validation=validation):
+            specs.extend(_member_specs(family, methods, label_prefix=family))
+        return specs
 
     if source is None:
         raise ValueError("source must be provided for a single-source ensemble.")
 
-    member_family = "localcv" if require_validation else "local"
+    member_family = "localcv" if validation else "local"
     if source != location:
         member_family = f"transfer_{source}"
-
-    member_specs = build_member_specs([member_family], methods)
-    exists = (
-        has_validation_member_specs(location, member_specs)
-        if require_validation
-        else has_corrected_member_specs(location, member_specs)
-    )
-    if not exists:
-        return []
-
-    return member_specs
+    specs = _member_specs(member_family, methods)
+    return specs if member_specs_exist(location, specs, validation=validation) else []
 
 
 def _default_target_locations(methods, source=None, combined=False):
-    candidates = (
+    locations = (
         get_core_buoy_locations()
         + get_external_validation_buoys()
         + get_study_area_locations()
     )
-
-    out = []
-    for location in candidates:
-        member_specs = _target_member_specs(
-            location,
-            methods,
-            source=source,
-            combined=combined,
-            require_validation=False,
-        )
-        if member_specs:
-            out.append(location)
-
-    return unique_locations(out)
+    return unique_locations(
+        location
+        for location in locations
+        if _target_member_specs(location, methods, source=source, combined=combined, validation=False)
+    )
 
 
-def _training_members(methods, source=None, combined=False):
+def _application_family(location, source, combined):
     if combined:
-        return _combined_member_labels(methods)
-    return list(methods)
+        return "transfer_combined"
+    return "local" if location is not None and location == source else f"transfer_{source}"
 
 
 def _mean_weight_map(weights, members):
-    return {
-        member: float(weights[:, idx].mean())
-        for idx, member in enumerate(members)
-    }
+    return {member: float(weights[:, idx].mean()) for idx, member in enumerate(members)}
 
 
-def run(
-    location=None,
-    methods=None,
-    source=None,
-    combined=False,
-    output_name=None,
-):
-    methods = normalize_methods(methods)
-    training_members = _training_members(methods, source=source, combined=combined)
-    settings_name = (
-        "ensemble_xgboost"
-        if combined or source is None
-        else f"ensemble_xgboost_{source}"
-    )
-
-    if combined:
-        training_specs = _combined_training_specs(methods)
-        apply_member_family = "transfer_combined"
-        output_name = output_name or "ensemble_combined"
-    else:
-        if source is None:
-            raise ValueError("source must be provided when combined=False.")
-        training_specs = _single_source_training_specs(source, methods)
-        apply_member_family = (
-            "local" if location is not None and source == location else f"transfer_{source}"
-        )
-        output_name = output_name or f"ensemble_{source}"
+def run(location=None, methods=None, source=None, combined=False, output_name=None):
+    setup = build_training_setup(source=None if combined else source, methods=methods)
+    methods = setup["methods"]
+    source = setup["source"]
+    combined = setup["combined"]
+    training_specs = setup["training_specs"]
+    training_members = setup["training_members"]
+    profile_name = setup["profile_name"]
+    output_name = output_name or setup["default_output_name"]
 
     target_locations = unique_locations(
         [location] if location else _default_target_locations(methods, source=source, combined=combined)
     )
     training_labels = [spec["label"] for spec in training_specs]
 
-    train_df = load_training_validation_specs(training_specs)
+    train_df = load_training_validation_data(training_specs)
     bundle = fit_state_corrected_ensemble(
         train_df,
         training_members,
-        settings_name=settings_name,
+        profile_name=profile_name,
     )
-
-    n_splits = int(get_validation_settings().get("local_cv_folds", 4))
     oof_pred = build_oof_predictions(
         train_df,
-        fit_fn=lambda fold_df: fit_state_corrected_ensemble(
-            fold_df,
+        fit_fn=lambda df_fold: fit_state_corrected_ensemble(
+            df_fold,
             training_members,
-            settings_name=settings_name,
+            profile_name=profile_name,
         ),
         predict_fn=predict_state_corrected_ensemble,
-        n_splits=n_splits,
+        n_splits=ENSEMBLE_OOF_FOLDS,
     )
 
     saved_validation = {}
     saved_hindcast = {}
     contributions = {}
-
-    training_targets = set()
-    if "apply_target" in train_df.columns:
-        training_targets = set(train_df["apply_target"].dropna().astype(str).tolist())
+    training_targets = set(train_df["apply_target"].dropna().astype(str).tolist()) if "apply_target" in train_df.columns else set()
 
     for target_location in target_locations:
-        hindcast_member_specs = _target_member_specs(
+        hindcast_specs = _target_member_specs(
             target_location,
             methods,
             source=source,
             combined=combined,
-            require_validation=False,
+            validation=False,
         )
-        if not hindcast_member_specs:
+        if not hindcast_specs:
             continue
 
-        input_families = unique_locations(
-            [spec["member_family"] for spec in hindcast_member_specs]
-        )
-        member_family_label = "|".join(input_families)
+        input_families = unique_locations(spec["member_family"] for spec in hindcast_specs)
+        family_label = "|".join(input_families)
         contributions.setdefault(target_location, {})["input_families"] = input_families
 
-        validation_member_specs = _target_member_specs(
+        validation_specs = _target_member_specs(
             target_location,
             methods,
             source=source,
             combined=combined,
-            require_validation=True,
+            validation=True,
         )
 
         if target_location in training_targets:
             mask = train_df["apply_target"].astype(str) == target_location
             df_val = train_df.loc[mask].copy().reset_index(drop=True)
-            pred = np.asarray(oof_pred[mask.to_numpy()], dtype=float)
             saved_validation[target_location] = save_validation_output(
                 location=target_location,
                 df=df_val,
-                prediction=pred,
+                prediction=np.asarray(oof_pred[mask.to_numpy()], dtype=float),
                 output_name=output_name,
                 train_locations=training_labels,
-                member_family=member_family_label,
+                member_family=family_label,
                 member_families=input_families,
                 methods=training_members,
                 validation_type="ensemble_oof",
             )
-        elif validation_member_specs:
-            df_val = load_validation_member_dataset_specs(
+        elif validation_specs:
+            df_val = load_validation_dataset(
                 location=target_location,
-                member_specs=validation_member_specs,
+                member_specs=validation_specs,
             )
-            pred, weights = predict_state_corrected_ensemble(
-                df_val,
-                bundle,
-                return_weights=True,
-            )
+            pred, weights = predict_state_corrected_ensemble(df_val, bundle, return_weights=True)
             saved_validation[target_location] = save_validation_output(
                 location=target_location,
                 df=df_val,
                 prediction=pred,
                 output_name=output_name,
                 train_locations=training_labels,
-                member_family=member_family_label,
+                member_family=family_label,
                 member_families=input_families,
                 methods=training_members,
                 validation_type="ensemble_external_apply",
@@ -280,15 +283,8 @@ def run(
                 training_members,
             )
 
-        df_hind = load_hindcast_member_dataset_specs(
-            target_location,
-            hindcast_member_specs,
-        )
-        pred, weights = predict_state_corrected_ensemble(
-            df_hind,
-            bundle,
-            return_weights=True,
-        )
+        df_hind = load_hindcast_dataset(target_location, hindcast_specs)
+        pred, weights = predict_state_corrected_ensemble(df_hind, bundle, return_weights=True)
         saved_hindcast[target_location] = save_hindcast_output(
             location=target_location,
             df=df_hind,
@@ -304,7 +300,7 @@ def run(
     report_path = save_ensemble_report(
         output_name=output_name,
         training_labels=training_labels,
-        member_family=apply_member_family,
+        member_family=_application_family(location, source, combined),
         methods=training_members,
         class_counts=bundle["class_counts"],
         top_features=bundle["top_features"],
@@ -316,9 +312,11 @@ def run(
         "training_labels": training_labels,
         "target_locations": target_locations,
         "training_member_families": unique_locations(
-            [spec["member_family"] for training_spec in training_specs for spec in training_spec["member_specs"]]
+            spec["member_family"]
+            for training_spec in training_specs
+            for spec in training_spec["member_specs"]
         ),
-        "application_member_family": apply_member_family,
+        "application_member_family": _application_family(location, source, combined),
         "class_counts": bundle["class_counts"],
         "top_features": bundle["top_features"],
         "validation_paths": saved_validation,

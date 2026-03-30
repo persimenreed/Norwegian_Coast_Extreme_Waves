@@ -6,13 +6,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.ensemble.xgboost_ensemble_transfer import run as run_ensemble
 from src.settings import (
     get_core_buoy_locations,
     get_external_validation_buoys,
     get_study_area_locations,
 )
 
+ENSEMBLE_MODELS = ["linear", "pqm", "gpr", "xgboost", "transformer", "dagqm"]
 
 def _print_paths(title, paths):
     if not paths:
@@ -120,16 +120,20 @@ def main():
     )
     args = parser.parse_args()
 
+    from src.ensemble.xgboost_ensemble_transfer import run as run_ensemble
+
     locations = [args.location] if args.location else _all_locations()
 
     for location in locations:
         print(f"\n==============================")
         print(f"LOCATION: {location}")
         print(f"==============================")
+        print(f"Ensemble members: {', '.join(ENSEMBLE_MODELS)}")
 
         for job in _ensemble_jobs_for_location(location):
             res = run_ensemble(
                 location=location,
+                methods=ENSEMBLE_MODELS,
                 source=job["source"],
                 combined=job["combined"],
                 output_name=job["output_name"],
