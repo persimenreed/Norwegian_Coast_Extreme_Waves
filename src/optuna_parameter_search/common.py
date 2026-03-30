@@ -1,261 +1,123 @@
+import inspect
 import sys
 from pathlib import Path
 
+import numpy as np
 import optuna
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import contextlib
-import copy
-import inspect
-import numpy as np
+from src.model_profiles import override_profile
+from src.settings import get_core_buoy_locations
 
-from src.bias_correction.data import load_pairs
-from src.bias_correction.validation import iter_local_cv_splits
-from src.settings import (
-    get_core_buoy_locations,
-    get_columns,
-    load_settings
-)
+HS_MODEL = "hs"
+HS_OBS = "Significant_Wave_Height_Hm0"
+CORE_BUOYS = get_core_buoy_locations()
+if len(CORE_BUOYS) != 2:
+    raise RuntimeError("Expected exactly two core buoys for spatial CV.")
 
-_COLUMNS = get_columns()
-
-HS_MODEL = _COLUMNS.get("hs_model", "hs")
-HS_OBS = _COLUMNS.get("hs_obs", "Significant_Wave_Height_Hm0")
-
-
-# ---------------------------------------------------------
-# Dataset cache (avoid reloading every Optuna trial)
-# ---------------------------------------------------------
-
-_core = get_core_buoy_locations()
-
-if len(_core) != 2:
-    raise RuntimeError(
-        "Expected exactly two core buoys for spatial CV."
-    )
-
-_BUOY_A, _BUOY_B = _core
-
-_DF_A = load_pairs(_BUOY_A)
-_DF_B = load_pairs(_BUOY_B)
-
-
-# ---------------------------------------------------------
-# Temporary override of settings.yaml hyperparameters
-# ---------------------------------------------------------
-
-@contextlib.contextmanager
-def override_method_settings(method_name, params, settings_name=None):
-
-    settings = load_settings()
-    settings_key = settings_name or method_name
-
-    if settings_key not in settings["ml"]:
-        settings["ml"][settings_key] = copy.deepcopy(
-            settings["ml"].get(method_name, {})
-        )
-
-    original = copy.deepcopy(settings["ml"].get(settings_key, {}))
-
-    settings["ml"][settings_key].update(params)
-
-    try:
-        yield
-    finally:
-        settings["ml"][settings_key] = original
-
-
-# ---------------------------------------------------------
-# RMSE
-# ---------------------------------------------------------
 
 def compute_rmse(y_true, y_pred):
-
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    return float(np.sqrt(np.mean((y_true[mask] - y_pred[mask]) ** 2))) if np.any(mask) else np.nan
 
-    m = np.isfinite(y_true) & np.isfinite(y_pred)
-
-    if np.sum(m) == 0:
-        return np.nan
-
-    return float(np.sqrt(np.mean((y_true[m] - y_pred[m]) ** 2)))
-
-
-# ---------------------------------------------------------
-# Quantile loss (Pinball loss)
-# ---------------------------------------------------------
 
 def compute_quantile_loss(y_true, y_pred, q=0.95):
-
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
-
-    m = np.isfinite(y_true) & np.isfinite(y_pred)
-
-    if np.sum(m) == 0:
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    if not np.any(mask):
         return np.nan
-
-    err = y_true[m] - y_pred[m]
-
-    loss = np.maximum(q * err, (q - 1) * err)
-
-    return float(np.mean(loss))
+    err = y_true[mask] - y_pred[mask]
+    return float(np.mean(np.maximum(q * err, (q - 1) * err)))
 
 
 def compute_tail_rmse(y_true, y_pred, q=0.95):
-
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
-
-    m = np.isfinite(y_true) & np.isfinite(y_pred)
-
-    if np.sum(m) < 20:
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    if np.sum(mask) < 20:
         return np.nan
 
-    thr = np.nanquantile(y_true[m], q)
-    tail = m & (y_true >= thr)
+    tail = mask & (y_true >= np.nanquantile(y_true[mask], q))
+    return compute_rmse(y_true[tail], y_pred[tail]) if np.sum(tail) >= 20 else np.nan
 
-    if np.sum(tail) < 20:
-        return np.nan
-
-    return compute_rmse(y_true[tail], y_pred[tail])
-
-
-def suggest_guided_quantile_residual_params(
-    trial,
-    *,
-    min_scale_choices=(0.0, 0.1, 0.15, 0.2, 0.25, 0.35),
-):
-    tail_pool_start = trial.suggest_categorical(
-        "tail_pool_start",
-        [0.90, 0.95, 0.97],
-    )
-    tail_pool_end = trial.suggest_categorical(
-        "tail_pool_end",
-        [0.99, 0.995, 0.999],
-    )
-    tail_residual_end = trial.suggest_categorical(
-        "tail_residual_end",
-        [0.995, 0.999],
-    )
-
-    if tail_pool_end <= tail_pool_start or tail_residual_end < tail_pool_end:
-        raise optuna.exceptions.TrialPruned()
-
-    return {
-        "tail_pool_enabled": True,
-        "tail_pool_start": tail_pool_start,
-        "tail_pool_end": tail_pool_end,
-        "tail_blend_start": tail_pool_start,
-        "tail_monotone": True,
-        "tail_residual_protection_enabled": True,
-        "tail_residual_protection_mode": "sign_aware",
-        "tail_residual_start": tail_pool_start,
-        "tail_residual_end": tail_residual_end,
-        "tail_residual_min_scale": trial.suggest_categorical(
-            "tail_residual_min_scale",
-            list(min_scale_choices),
-        ),
-    }
-
-
-# ---------------------------------------------------------
-# Combined metric emphasizing extremes
-# ---------------------------------------------------------
 
 def compute_extreme_metric(y_true, y_pred):
-
-    rmse = compute_rmse(y_true, y_pred)
-    qloss = compute_quantile_loss(y_true, y_pred, q=0.95)
-    tail_rmse = compute_tail_rmse(y_true, y_pred, q=0.95)
-
     parts = [
-        (0.35, rmse),
-        (0.35, qloss),
-        (0.30, tail_rmse),
+        (0.35, compute_rmse(y_true, y_pred)),
+        (0.35, compute_quantile_loss(y_true, y_pred, q=0.95)),
+        (0.30, compute_tail_rmse(y_true, y_pred, q=0.95)),
     ]
-
-    num = sum(w * v for w, v in parts if np.isfinite(v))
-    den = sum(w for w, v in parts if np.isfinite(v))
-
-    if den == 0:
+    total_weight = sum(weight for weight, value in parts if np.isfinite(value))
+    if total_weight == 0:
         return np.nan
-
-    return float(num / den)
-
-
-def _fit_with_optional_kwargs(
-    method_module,
-    df_train,
-    trial=None,
-    trial_step_offset=0,
-    settings_name=None,
-):
-    fit_params = inspect.signature(method_module.fit).parameters
-    extra_fit_kwargs = {}
-
-    if "trial_step_offset" in fit_params:
-        extra_fit_kwargs["trial_step_offset"] = trial_step_offset
-    if "settings_name" in fit_params and settings_name is not None:
-        extra_fit_kwargs["settings_name"] = settings_name
-
-    if trial is not None and "trial" in fit_params:
-        return method_module.fit(
-            df_train,
-            trial=trial,
-            **extra_fit_kwargs,
-        )
-
-    return method_module.fit(df_train, **extra_fit_kwargs)
+    return float(sum(weight * value for weight, value in parts if np.isfinite(value)) / total_weight)
 
 
-def evaluate_cv(method_name, method_module, params, trial=None, source=None, settings_name=None):
-    fit_params = inspect.signature(method_module.fit).parameters
-    has_internal_trial_reporting = trial is not None and "trial" in fit_params
+def _fit_with_optional_kwargs(method_module, df_train, trial=None, trial_step_offset=0, profile_name=None):
+    params = inspect.signature(method_module.fit).parameters
+    fit_kwargs = {}
+
+    if "trial_step_offset" in params:
+        fit_kwargs["trial_step_offset"] = trial_step_offset
+    if "settings_name" in params and profile_name is not None:
+        fit_kwargs["settings_name"] = profile_name
+
+    if trial is not None and "trial" in params:
+        fit_kwargs["trial"] = trial
+    return method_module.fit(df_train, **fit_kwargs)
+
+
+def _cv_splits(source=None):
+    from src.bias_correction.data import load_pairs
+    from src.bias_correction.validation import iter_local_cv_splits
 
     if source is None:
-        splits = [
-            (0, _DF_A, _DF_B, 1000),
-            (1, _DF_B, _DF_A, 1001),
-        ]
-    else:
-        df_source = load_pairs(source)
-        splits = [
-            (
-                split["fold"],
-                df_source.iloc[split["train_idx"]].copy(),
-                df_source.iloc[split["test_idx"]].copy(),
-                split["fold"] + 1,
+        return [
+            (fold_id, load_pairs(train_source), load_pairs(valid_source), 1000 + fold_id)
+            for fold_id, (train_source, valid_source) in enumerate(
+                ((CORE_BUOYS[0], CORE_BUOYS[1]), (CORE_BUOYS[1], CORE_BUOYS[0]))
             )
-            for split in iter_local_cv_splits(df_source)
         ]
-        if not splits:
-            raise ValueError(f"No local CV folds were generated for source '{source}'.")
+
+    df_source = load_pairs(source)
+    splits = [
+        (
+            split["fold"],
+            df_source.iloc[split["train_idx"]].copy(),
+            df_source.iloc[split["test_idx"]].copy(),
+            split["fold"] + 1,
+        )
+        for split in iter_local_cv_splits(df_source)
+    ]
+    if not splits:
+        raise ValueError(f"No local CV folds were generated for source '{source}'.")
+    return splits
+
+
+def evaluate_cv(method_module, params, trial=None, source=None, profile_name=None):
+    params_signature = inspect.signature(method_module.fit).parameters
+    has_internal_trial_reporting = trial is not None and "trial" in params_signature
+    profile_name = profile_name or method_module.__name__.rsplit(".", 1)[-1]
 
     scores = []
-    for fold_id, df_train, df_valid, report_step in splits:
-        with override_method_settings(
-            method_name,
-            params,
-            settings_name=settings_name,
-        ):
+    for fold_id, df_train, df_valid, report_step in _cv_splits(source):
+        with override_profile(profile_name, params):
             model = _fit_with_optional_kwargs(
                 method_module,
                 df_train,
                 trial=trial,
                 trial_step_offset=fold_id * 1000,
-                settings_name=settings_name,
+                profile_name=profile_name,
             )
             df_pred = method_module.apply(df_valid.copy(), model)
 
-        score = compute_extreme_metric(
-            df_valid[HS_OBS].values,
-            df_pred[HS_MODEL].values,
-        )
+        score = compute_extreme_metric(df_valid[HS_OBS].to_numpy(), df_pred[HS_MODEL].to_numpy())
         scores.append(score)
 
         if trial is not None and not has_internal_trial_reporting:
@@ -266,30 +128,48 @@ def evaluate_cv(method_name, method_module, params, trial=None, source=None, set
     return float(np.mean(scores))
 
 
-# ---------------------------------------------------------
-# Early stopping callback for Optuna
-# ---------------------------------------------------------
+def create_study(study_name, storage, startup_trials=40, warmup_steps=1, interval_steps=1):
+    return optuna.create_study(
+        direction="minimize",
+        study_name=study_name,
+        storage=storage,
+        load_if_exists=True,
+        sampler=optuna.samplers.TPESampler(
+            multivariate=True,
+            n_startup_trials=startup_trials,
+            seed=1,
+        ),
+        pruner=optuna.pruners.MedianPruner(
+            n_startup_trials=startup_trials,
+            n_warmup_steps=warmup_steps,
+            interval_steps=interval_steps,
+        ),
+    )
 
-import optuna
+
+def print_best_trial(study, **details):
+    print("\nBest trial:")
+    print("Score:", study.best_trial.value)
+    print("Params:", study.best_trial.params)
+    for key, value in details.items():
+        print(f"{key}:", value)
+
 
 class EarlyStoppingCallback:
-
     def __init__(self, patience=200):
         self.patience = patience
         self.best_trial = None
 
     def __call__(self, study, trial):
-
         completed_trials = [
-            t for t in study.trials
-            if t.state == optuna.trial.TrialState.COMPLETE
+            candidate
+            for candidate in study.trials
+            if candidate.state == optuna.trial.TrialState.COMPLETE
         ]
-
         if not completed_trials:
             return
 
-        best_trial = min(completed_trials, key=lambda t: t.value)
-
+        best_trial = min(completed_trials, key=lambda candidate: candidate.value)
         if self.best_trial is None:
             self.best_trial = best_trial.number
             return
@@ -298,8 +178,5 @@ class EarlyStoppingCallback:
             self.best_trial = best_trial.number
 
         if trial.number - self.best_trial >= self.patience:
-            print(
-                f"\nEarly stopping triggered: "
-                f"No improvement in {self.patience} trials."
-            )
+            print(f"\nEarly stopping triggered: No improvement in {self.patience} trials.")
             study.stop()
