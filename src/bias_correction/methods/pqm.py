@@ -96,7 +96,7 @@ def _fit_variable(df, source_col, target_col, candidates):
     }
 
 
-def fit(df):
+def fit(df, settings_name=None):
     return {
         "hs": _fit_variable(df, HS_MODEL, HS_OBS, ["weibull", "gamma", "lognormal"])
     }

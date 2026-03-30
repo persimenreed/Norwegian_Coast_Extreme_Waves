@@ -1,91 +1,85 @@
-import numpy as np
+from copy import deepcopy
+
 import pandas as pd
 
-from src.settings import get_method_settings
+from src.model_profiles import resolve_profile
 from src.bias_correction.methods.common import (
-    TIME,
     HS_MODEL,
     HS_OBS,
+    HS_QUANTILE,
     HS_QUANTILE_BASELINE,
-    prepare_ml_dataframe,
-    resolve_feature_columns,
-    quantile_feature_columns,
     augment_quantile_features,
-    build_target_transform,
-    invert_target,
-    protect_tail_residuals,
     build_tail_sample_weights,
+    build_target_transform,
+    feature_matrix,
+    invert_target,
+    numeric_values,
+    prepare_ml_dataframe,
+    protect_tail_residuals,
+    quantile_feature_columns,
+    resolve_feature_columns,
+    restore_frame_order,
+    sort_frame,
 )
 
+DEFAULT_XGBOOST_CONFIG = {
+    "features": [],
+    "min_train_samples": 50,
+    "quantile_bias_mode": "additive",
+    "target_eps": 1e-5,
+    "tail_weight_q90": 3.0,
+    "tail_weight_q95": 6.0,
+    "tail_weight_q99": 14.0,
+    "tail_pool_enabled": True,
+    "tail_pool_start": 0.95,
+    "tail_pool_end": 0.995,
+    "tail_blend_start": 0.95,
+    "tail_residual_protection_enabled": True,
+    "tail_residual_protection_mode": "sign_aware",
+    "tail_residual_start": 0.95,
+    "tail_residual_end": 0.999,
+    "tail_residual_min_scale": 0.20,
+    "n_estimators": 600,
+    "max_depth": 4,
+    "learning_rate": 0.05,
+    "subsample": 0.85,
+    "colsample_bytree": 0.88,
+    "gamma": 1.0,
+    "min_child_weight": 1.0,
+    "reg_alpha": 0.01,
+    "reg_lambda": 1.0,
+    "random_state": 1,
+}
 
-def _prepare_features(df, feature_cols, fill=None):
-    X = prepare_ml_dataframe(df)[feature_cols].copy()
-
-    if fill is None:
-        fill = {}
-        for col in feature_cols:
-            m = float(np.nanmedian(pd.to_numeric(X[col], errors="coerce").values))
-            if not np.isfinite(m):
-                m = 0.0
-            fill[col] = m
-
-    for col in feature_cols:
-        X[col] = pd.to_numeric(X[col], errors="coerce").fillna(fill[col])
-
-    return X.values.astype(np.float32), fill
+def _resolve_config(settings_name=None):
+    return resolve_profile(deepcopy(DEFAULT_XGBOOST_CONFIG), "xgboost", settings_name)
 
 
 def fit(df, settings_name=None):
     try:
         from xgboost import XGBRegressor
-    except ImportError as e:
+    except ImportError as error:
         raise ImportError(
             "XGBoost is not installed. Install it with: pip install xgboost"
-        ) from e
+        ) from error
 
-    if not settings_name:
-        raise ValueError("settings_name must be provided for XGBoost training.")
+    cfg = _resolve_config(settings_name)
+    work = prepare_ml_dataframe(sort_frame(df))
 
-    cfg = get_method_settings(settings_name)
-    if not cfg:
-        raise ValueError(f"Missing XGBoost settings block '{settings_name}'.")
+    obs = numeric_values(work, HS_OBS, dtype="float32")
+    raw = numeric_values(work, HS_MODEL, dtype="float32")
+    target, valid_target, transform_cfg = build_target_transform(obs, raw, cfg)
 
-    work = df.copy()
-    if TIME in work.columns:
-        work[TIME] = pd.to_datetime(work[TIME], errors="coerce")
-        work = work.sort_values(TIME).reset_index(drop=True)
+    work, _ = augment_quantile_features(work, raw, transform_cfg, reference_values=raw)
 
-    work = prepare_ml_dataframe(work)
+    features = resolve_feature_columns(work, cfg.get("features"))
+    features = quantile_feature_columns(features)
 
-    obs = pd.to_numeric(work[HS_OBS], errors="coerce").values.astype(np.float32)
-    raw = pd.to_numeric(work[HS_MODEL], errors="coerce").values.astype(np.float32)
-    y, valid_target, transform_cfg = build_target_transform(obs, raw, cfg)
-
-    if transform_cfg["mode"] == "quantile_residual":
-        work, _ = augment_quantile_features(
-            work,
-            raw,
-            transform_cfg,
-            reference_values=raw,
-        )
-
-    features = resolve_feature_columns(work, cfg.get("features", []))
-    if transform_cfg["mode"] == "quantile_residual":
-        features = quantile_feature_columns(features)
-
-    valid_idx = np.flatnonzero(valid_target)
-
-    min_train = int(cfg.get("min_train_samples", 50))
-    if len(valid_idx) < min_train:
+    valid_idx = valid_target.nonzero()[0]
+    if len(valid_idx) < int(cfg.get("min_train_samples", 50)):
         raise ValueError("Too few valid samples for XGBoost.")
 
-    X_all, fill = _prepare_features(work, features)
-    weights_all = build_tail_sample_weights(obs, cfg, dtype=float)
-
-    X_train = X_all[valid_idx]
-    y_train = y[valid_idx]
-    w_train = weights_all[valid_idx]
-
+    X_all, fill = feature_matrix(work, features)
     model = XGBRegressor(
         n_estimators=int(cfg.get("n_estimators", 300)),
         max_depth=int(cfg.get("max_depth", 4)),
@@ -101,14 +95,15 @@ def fit(df, settings_name=None):
         eval_metric="rmse",
         n_jobs=-1,
     )
-
-    model.fit(X_train, y_train, sample_weight=w_train, verbose=False)
+    model.fit(
+        X_all[valid_idx],
+        target[valid_idx],
+        sample_weight=build_tail_sample_weights(obs, cfg, dtype=float)[valid_idx],
+        verbose=False,
+    )
 
     importance = pd.DataFrame(
-        {
-            "feature": features,
-            "importance": model.feature_importances_,
-        }
+        {"feature": features, "importance": model.feature_importances_}
     ).sort_values("importance", ascending=False, ignore_index=True)
 
     return {
@@ -121,44 +116,20 @@ def fit(df, settings_name=None):
 
 
 def apply(df, bundle):
-    out = df.copy()
-    if TIME in out.columns:
-        out[TIME] = pd.to_datetime(out[TIME], errors="coerce")
-        out = out.sort_values(TIME).reset_index(drop=False).rename(columns={"index": "_orig_index"})
-    else:
-        out["_orig_index"] = np.arange(len(out))
-
-    prepared = prepare_ml_dataframe(out.copy())
-    transform_cfg = bundle.get(
-        "target_transform",
-        {"mode": "additive_residual", "eps": 1e-4},
-    )
-
-    if transform_cfg.get("mode") == "quantile_residual":
-        raw = pd.to_numeric(prepared[HS_MODEL], errors="coerce").values.astype(np.float32)
-        prepared, extras = augment_quantile_features(
-            prepared,
-            raw,
-            transform_cfg,
-            reference_values=raw,
-        )
-        base_values = extras[HS_QUANTILE_BASELINE]
-        quantiles = extras["hs_quantile"]
-    else:
-        base_values = pd.to_numeric(prepared[HS_MODEL], errors="coerce").values.astype(np.float32)
-        quantiles = None
-
-    X, _ = _prepare_features(prepared, bundle["features"], bundle["fill"])
-
-    residual = bundle["model"].predict(X)
-    if quantiles is not None:
-        residual = protect_tail_residuals(residual, quantiles, transform_cfg)
-    prepared[HS_MODEL] = invert_target(
-        residual,
-        base_values,
+    prepared = prepare_ml_dataframe(sort_frame(df, preserve_order=True))
+    transform_cfg = bundle["target_transform"]
+    raw = numeric_values(prepared, HS_MODEL, dtype="float32")
+    prepared, extras = augment_quantile_features(
+        prepared,
+        raw,
         transform_cfg,
+        reference_values=raw,
     )
+    base_values = extras[HS_QUANTILE_BASELINE]
+    quantiles = extras[HS_QUANTILE]
 
-    prepared = prepared.sort_values("_orig_index").drop(columns=["_orig_index"])
-    prepared.index = range(len(prepared))
-    return prepared
+    X, _ = feature_matrix(prepared, bundle["features"], fill=bundle["fill"])
+    residual = bundle["model"].predict(X)
+    residual = protect_tail_residuals(residual, quantiles, transform_cfg)
+    prepared[HS_MODEL] = invert_target(residual, base_values, transform_cfg)
+    return restore_frame_order(prepared)

@@ -7,7 +7,7 @@ from src.bias_correction.methods.common import (
 )
 
 
-def fit(df):
+def fit(df, settings_name=None):
     x = df[HS_MODEL].values
     y = df[HS_OBS].values
 

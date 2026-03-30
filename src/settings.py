@@ -3,6 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 
 SETTINGS_PATH = Path("config/settings.yaml")
+DEFAULT_METHODS = ["linear", "pqm", "dagqm", "gpr", "xgboost", "transformer"]
 
 
 @lru_cache(maxsize=1)
@@ -11,34 +12,6 @@ def load_settings(path: str = str(SETTINGS_PATH)):
     if not p.exists():
         raise FileNotFoundError(f"Settings file not found: {p}")
     return json.loads(p.read_text(encoding="utf-8"))
-
-
-def get_columns():
-    return load_settings().get("columns", {})
-
-
-def get_thresholds():
-    return load_settings().get("thresholds", {})
-
-
-def get_validation_settings():
-    return load_settings().get("validation", {})
-
-
-def get_dagqm_settings():
-    return load_settings().get("dagqm", {})
-
-
-def get_ml_settings():
-    return load_settings().get("ml", {})
-
-
-def get_method_settings(name: str):
-    return get_ml_settings().get(name, {})
-
-
-def get_default_ml_features():
-    return list(get_ml_settings().get("default_features", []))
 
 
 def get_locations():
@@ -74,9 +47,7 @@ def get_all_locations():
 
 def get_methods():
     methods = load_settings().get("methods", [])
-    if methods:
-        return list(methods)
-    return ["linear", "pqm", "dagqm", "gpr", "xgboost", "transformer"]
+    return list(methods) if methods else list(DEFAULT_METHODS)
 
 
 def get_path_template(name: str) -> str:
@@ -88,11 +59,3 @@ def get_path_template(name: str) -> str:
 
 def format_path(name: str, **kwargs) -> str:
     return get_path_template(name).format(**kwargs)
-
-
-def get_evt_return_periods():
-    return get_thresholds().get("evt_return_periods", [10, 20, 50])
-
-
-def get_evt_bootstrap_samples():
-    return int(get_thresholds().get("evt_bootstrap_samples", 2000))

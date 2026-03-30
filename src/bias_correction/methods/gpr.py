@@ -1,53 +1,26 @@
 import numpy as np
-import pandas as pd
 
-from src.settings import get_method_settings
 from src.bias_correction.methods.common import (
-    TIME,
     HS_MODEL,
     HS_OBS,
+    clip_nonnegative,
+    feature_matrix,
+    fit_standard_scaler,
+    numeric_values,
     prepare_ml_dataframe,
     resolve_feature_columns,
-    clip_nonnegative,
+    restore_frame_order,
+    sort_frame,
 )
 
-
-def _fit_fill_and_scaler(df, feature_cols):
-    fill = {}
-    mean = {}
-    std = {}
-
-    for col in feature_cols:
-        vals = pd.to_numeric(df[col], errors="coerce").values.astype(float)
-        med = float(np.nanmedian(vals))
-        if not np.isfinite(med):
-            med = 0.0
-        fill[col] = med
-
-        vals = np.where(np.isfinite(vals), vals, med)
-        mu = float(np.mean(vals))
-        sigma = float(np.std(vals))
-        if not np.isfinite(sigma) or sigma <= 0:
-            sigma = 1.0
-        mean[col] = mu
-        std[col] = sigma
-
-    return fill, mean, std
+GPR_CONFIG = {
+    "max_train_samples": 1500,
+    "random_state": 1,
+    "n_restarts_optimizer": 2,
+}
 
 
-def _transform_features(df, feature_cols, fill, mean, std):
-    X = np.zeros((len(df), len(feature_cols)), dtype=np.float64)
-
-    for j, col in enumerate(feature_cols):
-        vals = pd.to_numeric(df[col], errors="coerce").values.astype(float)
-        vals = np.where(np.isfinite(vals), vals, fill[col])
-        vals = (vals - mean[col]) / std[col]
-        X[:, j] = vals
-
-    return X
-
-
-def fit(df):
+def fit(df, settings_name=None):
     try:
         from sklearn.gaussian_process import GaussianProcessRegressor
         from sklearn.gaussian_process.kernels import (
@@ -56,38 +29,26 @@ def fit(df):
             RationalQuadratic,
             WhiteKernel,
         )
-    except ImportError as e:
+    except ImportError as error:
         raise ImportError(
             "scikit-learn is required for GPR. Install it with: pip install scikit-learn"
-        ) from e
+        ) from error
 
-    cfg = get_method_settings("gpr")
+    work = prepare_ml_dataframe(sort_frame(df))
+    features = resolve_feature_columns(work)
 
-    work = df.copy()
-    if TIME in work.columns:
-        work[TIME] = pd.to_datetime(work[TIME], errors="coerce")
-        work = work.sort_values(TIME).reset_index(drop=True)
-
-    work = prepare_ml_dataframe(work)
-    features = resolve_feature_columns(work, cfg.get("features", []))
-
-    y = pd.to_numeric(work[HS_OBS], errors="coerce").values - pd.to_numeric(
-        work[HS_MODEL], errors="coerce"
-    ).values
-    valid = np.isfinite(y)
-
+    residual = numeric_values(work, HS_OBS) - numeric_values(work, HS_MODEL)
+    valid = np.isfinite(residual)
     if np.sum(valid) < 30:
         raise ValueError("Too few valid samples for GPR.")
 
     fit_df = work.loc[valid].reset_index(drop=True)
-    y_fit = y[valid].astype(float)
+    fill, mean, std = fit_standard_scaler(fit_df, features)
+    X_fit, _ = feature_matrix(fit_df, features, fill=fill, mean=mean, std=std, dtype=np.float64)
+    y_fit = residual[valid].astype(float)
 
-    fill, mean, std = _fit_fill_and_scaler(fit_df, features)
-    X_fit = _transform_features(fit_df, features, fill, mean, std)
-
-    max_train = int(cfg.get("max_train_samples", 1500))
-    if len(X_fit) > max_train:
-        idx = np.linspace(0, len(X_fit) - 1, max_train).astype(int)
+    if len(X_fit) > GPR_CONFIG["max_train_samples"]:
+        idx = np.linspace(0, len(X_fit) - 1, GPR_CONFIG["max_train_samples"]).astype(int)
         X_fit = X_fit[idx]
         y_fit = y_fit[idx]
 
@@ -96,15 +57,13 @@ def fit(df):
         * (RBF(length_scale=np.ones(X_fit.shape[1])) + RationalQuadratic())
         + WhiteKernel(noise_level=1e-3, noise_level_bounds=(1e-8, 1.0))
     )
-
     model = GaussianProcessRegressor(
         kernel=kernel,
         alpha=1e-6,
         normalize_y=True,
-        n_restarts_optimizer=int(cfg.get("n_restarts_optimizer", 2)),
-        random_state=int(cfg.get("random_state", 1)),
+        n_restarts_optimizer=GPR_CONFIG["n_restarts_optimizer"],
+        random_state=GPR_CONFIG["random_state"],
     )
-
     model.fit(X_fit, y_fit)
 
     return {
@@ -117,26 +76,16 @@ def fit(df):
 
 
 def apply(df, bundle):
-    out = df.copy()
-    if TIME in out.columns:
-        out[TIME] = pd.to_datetime(out[TIME], errors="coerce")
-        out = out.sort_values(TIME).reset_index(drop=False).rename(columns={"index": "_orig_index"})
-    else:
-        out["_orig_index"] = np.arange(len(out))
-
-    prepared = prepare_ml_dataframe(out.copy())
-    X = _transform_features(
+    prepared = prepare_ml_dataframe(sort_frame(df, preserve_order=True))
+    X, _ = feature_matrix(
         prepared,
         bundle["features"],
-        bundle["fill"],
-        bundle["mean"],
-        bundle["std"],
+        fill=bundle["fill"],
+        mean=bundle["mean"],
+        std=bundle["std"],
+        dtype=np.float64,
     )
-
-    residual = bundle["model"].predict(X)
-    hs = pd.to_numeric(prepared[HS_MODEL], errors="coerce").values.astype(float)
-    prepared[HS_MODEL] = clip_nonnegative(hs + residual)
-
-    prepared = prepared.sort_values("_orig_index").drop(columns=["_orig_index"])
-    prepared.index = range(len(prepared))
-    return prepared
+    prepared[HS_MODEL] = clip_nonnegative(
+        numeric_values(prepared, HS_MODEL) + bundle["model"].predict(X)
+    )
+    return restore_frame_order(prepared)
