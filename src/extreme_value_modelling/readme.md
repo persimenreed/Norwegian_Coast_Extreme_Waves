@@ -1,92 +1,30 @@
-# Extreme Value Modelling – NORA3 Site Analysis
+# Extreme Value Modelling
 
-This folder contains scripts used to perform Extreme Value Theory (EVT) analysis on NORA3 significant wave height (Hs) data for the selected site.
+This module runs the EVT stage for one hindcast dataset at a time:
 
-The workflow follows classical EVT methodology:
+- annual maxima -> GEV
+- POT exceedances -> GPD
 
-- Block Maxima → GEV
-- Peaks Over Threshold (POT) → GPD
+The active pipeline is:
 
----
+1. `extreme_preprocessing.py`
+   Builds `annual_maxima.csv` and `pot_peaks.csv` from the input hindcast using fixed defaults:
+   - wave-height column: `hs`
+   - time column: `time`
+   - POT threshold: 95th percentile
+   - declustering window: 48 hours
 
-# 1. extreme_preprocessing.py
+2. `fit_gev.py`
+   Fits a GEV model from `annual_maxima.csv`, writes plots, and returns 1-50 year return levels with bootstrap confidence intervals.
 
-Purpose:
-- Loads NORA3 site dataset (1969–2025)
-- Computes annual maxima (for GEV)
-- Computes POT peaks using:
-  - 95% quantile threshold
-  - 48-hour declustering window
-- Stores:
-  - annual_maxima.csv
-  - pot_peaks.csv
+3. `fit_gpd.py`
+   Fits a GPD model from `pot_peaks.csv`, recomputes threshold and exceedance rate from the source hindcast, writes plots, and returns 1-50 year return levels with bootstrap confidence intervals.
 
-This script must be run before any fitting.
+4. `diagnostics.py`
+   Writes the threshold-diagnostic figure for the selected dataset when requested.
 
----
+Use `experiments/run_extreme_value_modelling.py` to run the full stage for:
 
-# 2. fit_gev.py
-
-Purpose:
-- Fits Generalized Extreme Value (GEV) distribution to annual maxima.
-- Estimates:
-  - Shape (ξ)
-  - Location (μ)
-  - Scale (σ)
-- Computes return levels (10, 20, 50 years).
-- Computes 95% confidence intervals using parametric bootstrap.
-- Produces:
-  - Return level curve with CI
-  - GEV QQ-plot
-
-Used as block maxima baseline model.
-
----
-
-# 3. fit_gpd.py
-
-Purpose:
-- Fits Generalized Pareto Distribution (GPD) to declustered excesses.
-- Uses threshold settings from `config/settings.yaml` and recomputes threshold/lambda from the source hindcast.
-- Estimates:
-  - Shape (ξ)
-  - Scale (σ)
-- Computes return levels (10, 20, 50 years).
-- Computes 95% confidence intervals using parametric bootstrap.
-- Produces:
-  - Return level curve with CI
-  - GPD QQ-plot
-
-Used as POT baseline model.
-
----
-
-# 4. mean_residual_life.py
-
-Purpose:
-- Produces Mean Residual Life (MRL) plot.
-- Used to assess threshold suitability.
-- Linear region indicates valid threshold for GPD modelling.
-
----
-
-# 5. threshold_stability.py
-
-Purpose:
-- Evaluates GPD shape parameter ξ as function of threshold.
-- Stable plateau indicates appropriate threshold region.
-- Used to validate chosen 95% threshold.
-
----
-
-# 6. run_evt.py
-
-Use `experiments/run_evt.py` to run:
-- preprocessing
-- GEV fit
-- GPD fit
-
-Optional flags also run:
-- MRL plot
-- threshold stability plot
-- raw vs corrected threshold-stability comparison
+- one location and all methods
+- one location and one method
+- one method across all locations

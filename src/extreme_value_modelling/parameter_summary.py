@@ -1,11 +1,11 @@
 import pandas as pd
 from pathlib import Path
-from src.settings import get_path_template
+
+from src.extreme_value_modelling.common import evt_root
 
 
 def _summary_file(location: str) -> Path:
-    root = Path(get_path_template("evt_results_root"))
-    return root / location / "evt_parameter_summary.csv"
+    return evt_root() / location / "evt_parameter_summary.csv"
 
 
 def update_parameter_summary(row: dict):
