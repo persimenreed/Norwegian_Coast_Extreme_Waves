@@ -17,9 +17,6 @@ def _style_for_name(name):
     if name.startswith("transfer_"):
         return {"linestyle": ":", "linewidth": 1.4}
 
-    if name.startswith("pooled_"):
-        return {"linestyle": "-.", "linewidth": 1.6}
-
     if name.startswith("ensemble_"):
         return {"linestyle": "-", "linewidth": 2.2}
 
@@ -32,7 +29,7 @@ def _pdf_cdf_style(name):
 
     if name == "raw":
         style.update({"linewidth": 2.0, "alpha": 0.9})
-    elif name.startswith("ensemble_") or name in {"ensemble_transfer", "ensemble_pooling"}:
+    elif name.startswith("ensemble_"):
         style.update({"linewidth": 2.0, "alpha": 0.9})
 
     return style
@@ -55,13 +52,11 @@ def _split_series_for_eval_plots(series_dict):
 
         if (
             name.startswith("transfer_")
-            or name.startswith("pooled_")
             or name.startswith("ensemble_")
-            or name in {"ensemble_transfer", "ensemble_pooling"}
         ):
             transfer[name] = values
 
-        if name.startswith("ensemble_") or name in {"ensemble_transfer", "ensemble_pooling"}:
+        if name.startswith("ensemble_"):
             ensemble[name] = values
 
     return {"local": local, "transfer": transfer, "ensemble": ensemble}
@@ -132,7 +127,7 @@ def _residual_style(name):
 
     if name == "raw":
         style.update({"alpha": 0.9, "s": 12})
-    elif name.startswith("ensemble_") or name in {"ensemble_transfer", "ensemble_pooling"}:
+    elif name.startswith("ensemble_"):
         style.update({"alpha": 0.9, "s": 12})
 
     return style
