@@ -29,8 +29,8 @@ def dataset_label(d):
         if len(parts) == 3:
             return parts[2]
         return d.replace("transfer_", "")
-    if d.startswith("pooled_"):
-        return d.replace("pooled_", "")
+    if d.startswith("ensemble_"):
+        return d.replace("ensemble_", "")
     return d
 
 

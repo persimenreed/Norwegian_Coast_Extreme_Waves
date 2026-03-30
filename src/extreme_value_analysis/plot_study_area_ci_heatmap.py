@@ -34,7 +34,7 @@ def dataset_sort_key(name: str):
         return (1, name)
     if name.startswith("transfer_"):
         return (2, name)
-    if name.startswith("pooled_"):
+    if name.startswith("ensemble_"):
         return (3, name)
     return (4, name)
 

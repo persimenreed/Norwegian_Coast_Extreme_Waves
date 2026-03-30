@@ -19,16 +19,12 @@ def load_summary(location):
 def dataset_label(d):
     if d == "raw":
         return "raw"
-    if d == "ensemble_pooling":
-        return "ensemble: pooling"
-    if d == "ensemble_transfer":
-        return "ensemble: transfer"
     if d.startswith("local_"):
         return d.replace("local_", "local: ")
     if d.startswith("transfer_"):
         return d.replace("transfer_", "transfer: ")
-    if d.startswith("pooled_"):
-        return d.replace("pooled_", "pooled: ")
+    if d.startswith("ensemble_"):
+        return d.replace("ensemble_", "ensemble: ")
     return d
 
 
@@ -37,16 +33,12 @@ def dataset_tag(datasets):
     for d in datasets:
         if d == "raw":
             tags.append("raw")
-        elif d == "ensemble_pooling":
-            tags.append("ens-pool")
-        elif d == "ensemble_transfer":
-            tags.append("ens-tr")
         elif d.startswith("local_"):
             tags.append(d.replace("local_", "loc-"))
         elif d.startswith("transfer_"):
             tags.append(d.replace("transfer_", "tr-"))
-        elif d.startswith("pooled_"):
-            tags.append(d.replace("pooled_", "pool-"))
+        elif d.startswith("ensemble_"):
+            tags.append(d.replace("ensemble_", "ens-"))
         else:
             tags.append(d)
     return "-".join(tags)

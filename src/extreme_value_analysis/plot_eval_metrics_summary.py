@@ -69,16 +69,7 @@ def _method_sort_key(name: str):
     if name.startswith("ensemble_"):
         return (3, name)
 
-    if name.startswith("pooled_"):
-        return (4, name)
-
-    if name == "ensemble_transfer":
-        return (5, name)
-
-    if name == "ensemble_pooling":
-        return (6, name)
-
-    return (7, name)
+    return (4, name)
 
 
 def _opposite_location(location: str):
@@ -135,42 +126,6 @@ def _plot_single_heatmap(location: str, plot_df: pd.DataFrame, suffix: str):
     plt.close()
 
     print(f"Saved {path}")
-
-
-def _plot_vestfjorden_raw_vs_ensemble_extensive(df: pd.DataFrame):
-    methods = {"raw", "ensemble_pooling", "ensemble_transfer"}
-    sub = df[df["method"].isin(methods)].copy()
-
-    if sub["method"].nunique() < 2:
-        return
-
-    ordered = [
-        "raw",
-        "ensemble_transfer",
-        "ensemble_pooling",
-    ]
-    ordered = [name for name in ordered if name in sub["method"].values]
-    sub["method"] = pd.Categorical(sub["method"], categories=ordered, ordered=True)
-    sub = sub.sort_values("method")
-
-    metrics = [c for c in VESTFJORDEN_EXTENDED_METRICS if c in sub.columns]
-    if not metrics:
-        return
-
-    plot_df = sub.set_index("method")[metrics].copy()
-
-    # Absolute bias-like terms so color intensity reflects error magnitude.
-    abs_cols = [
-        "q95_bias",
-        "q99_bias",
-        "exceed_rate_bias_q95",
-        "exceed_rate_bias_q99",
-    ]
-    for col in abs_cols:
-        if col in plot_df.columns:
-            plot_df[col] = plot_df[col].abs()
-
-    _plot_single_heatmap("vestfjorden", plot_df, "raw_vs_ensembles_extended")
 
 
 def _plot_vestfjorden_raw_vs_named_ensembles(df: pd.DataFrame, metrics):
@@ -278,18 +233,15 @@ def _plot_location_bias_by_method_heatmap(location: str):
     if location in {"fauskane", "fedjeosen"}:
         ensemble_local = f"ensemble_{location}"
         opposite = _opposite_location(location)
-        ensemble_transfer = f"ensemble_{opposite}" if opposite else None
+        ensemble_opposite = f"ensemble_{opposite}" if opposite else None
 
         if ensemble_local in methods:
             local.append(ensemble_local)
-        if ensemble_transfer and ensemble_transfer in methods:
-            transfer.append(ensemble_transfer)
+        if ensemble_opposite and ensemble_opposite in methods:
+            transfer.append(ensemble_opposite)
 
     if location == "vestfjorden":
         transfer.extend([m for m in methods if m.startswith("ensemble_")])
-
-    if "ensemble_transfer" in methods:
-        transfer.append("ensemble_transfer")
 
     groups = {
         "local": sorted(set(local), key=_method_sort_key),
@@ -369,9 +321,6 @@ def _build_groups(df, location):
         groups["transfer"] = ["raw"] + transfer
         if ensemble_opposite and ensemble_opposite in methods:
             groups["transfer"].append(ensemble_opposite)
-        elif "ensemble_transfer" in methods:
-            groups["transfer"].append("ensemble_transfer")
-
     return groups
 
 
@@ -420,7 +369,6 @@ def plot_heatmap(location: str, metrics=None):
 
     if location == "vestfjorden":
         _plot_vestfjorden_raw_vs_named_ensembles(df, metrics)
-        _plot_vestfjorden_raw_vs_ensemble_extensive(df)
 
 
 def _plot_improvement(imp: pd.DataFrame, location: str, suffix: str, title_prefix: str):
@@ -530,10 +478,6 @@ def plot_improvement_vs_raw(location: str):
     ensemble_opposite = f"ensemble_{opposite}" if opposite else None
     if ensemble_opposite and ensemble_opposite in df["method"].values:
         transfer_methods.add(ensemble_opposite)
-
-    # Keep legacy aggregate transfer ensemble when present.
-    if "ensemble_transfer" in df["method"].values:
-        transfer_methods.add("ensemble_transfer")
 
     imp_transfer = _build_improvement_table(df, transfer_methods)
     _plot_improvement(imp_transfer, location, "transfer", "Transfer improvement")

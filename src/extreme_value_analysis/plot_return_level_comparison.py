@@ -30,8 +30,6 @@ def dataset_label(d):
         return d.replace("local_", "local: ")
     if d.startswith("transfer_"):
         return d.replace("transfer_", "transfer: ")
-    if d.startswith("pooled_"):
-        return d.replace("pooled_", "pooled: ")
     if d.startswith("ensemble_"):
         return d.replace("ensemble_", "ensemble: ")
     return d
