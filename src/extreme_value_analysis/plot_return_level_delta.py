@@ -8,13 +8,19 @@ import matplotlib.pyplot as plt
 
 SUMMARY_ROOT = Path("results/extreme_value_modelling")
 OUT = Path("results/extreme_value_analysis/return_level_delta")
+MIN_RETURN_PERIOD = 1.0
+MAX_RETURN_PERIOD = 50.0
 
 
 def load_summary(location):
     path = SUMMARY_ROOT / location / "summary_return_levels.csv"
     if not path.exists():
         raise FileNotFoundError(path)
-    return pd.read_csv(path)
+    df = pd.read_csv(path)
+    df["return_period"] = pd.to_numeric(df["return_period"], errors="coerce")
+    return df[
+        df["return_period"].between(MIN_RETURN_PERIOD, MAX_RETURN_PERIOD, inclusive="both")
+    ].copy()
 
 
 def dataset_label(d):
@@ -39,9 +45,6 @@ def plot_delta(location, datasets):
         if raw.empty:
             print(f"No raw dataset found for {location} / {model}")
             continue
-
-        T_raw = raw["return_period"].values
-        RL_raw = raw["return_level"].values
 
         plt.figure(figsize=(8, 5))
 
@@ -89,6 +92,7 @@ def plot_delta(location, datasets):
         plt.xlabel("Return period (years)")
         plt.ylabel("delta return level vs raw (m)")
         plt.title(f"{model} return-level change — {location}{correction_label}")
+        plt.xlim(MIN_RETURN_PERIOD, MAX_RETURN_PERIOD)
         plt.grid(alpha=0.3)
         plt.legend()
 
