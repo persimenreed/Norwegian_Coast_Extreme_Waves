@@ -388,9 +388,11 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
     best_state = None
     best_val = np.inf
     no_improve = 0
+    history = []
 
     for epoch in range(cfg_int(cfg, "max_epochs", 200)):
         model.train()
+        train_losses = []
         for xb, yb, wb, ob, bb in train_loader:
             xb = xb.to(device, non_blocking=use_cuda).contiguous()
             yb = yb.to(device, non_blocking=use_cuda)
@@ -403,9 +405,20 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            train_losses.append(float(loss.detach().cpu().item()))
+
+        train_loss = float(np.mean(train_losses)) if train_losses else np.nan
 
         if val_loader is None:
             best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+            history.append(
+                {
+                    "epoch": epoch + 1,
+                    "train_loss": train_loss,
+                    "val_loss": np.nan,
+                    "best_val_loss": np.nan,
+                }
+            )
             continue
 
         model.eval()
@@ -420,13 +433,14 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
                 losses.append(_mixed_loss(model(xb), yb, wb, ob, bb, transform_cfg, cfg).item())
 
         val_loss = float(np.mean(losses)) if losses else np.inf
-        if trial is not None:
-            trial.report(val_loss, int(trial_step_offset) + epoch)
-            if trial.should_prune():
-                import optuna
-
-                raise optuna.exceptions.TrialPruned()
-
+        history.append(
+            {
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "best_val_loss": min(best_val, val_loss),
+            }
+        )
         if val_loss < best_val:
             best_val = val_loss
             no_improve = 0
@@ -447,6 +461,7 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
         "sequence_length": sequence_length,
         "model": model.to("cpu").eval(),
         "target_transform": transform_cfg,
+        "training_history": pd.DataFrame(history),
     }
 
 

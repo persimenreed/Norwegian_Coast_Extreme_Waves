@@ -66,6 +66,36 @@ def _save_local_feature_importance(location, method_name, model):
     return str(path)
 
 
+def _save_local_training_history(location, method_name, model):
+    history = model.get("training_history") if isinstance(model, dict) else None
+    if history is None or history.empty or location not in set(get_core_buoy_locations()):
+        return None
+
+    out_dir = Path("results") / "bias_correction" / location
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / f"training_history_local_{method_name}.csv"
+    history.to_csv(csv_path, index=False)
+
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return str(csv_path)
+
+    fig, ax = plt.subplots(figsize=(6.5, 4.0))
+    ax.plot(history["epoch"], history["train_loss"], label="Train loss")
+    if "val_loss" in history and history["val_loss"].notna().any():
+        ax.plot(history["epoch"], history["val_loss"], label="Validation loss")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title(f"{method_name} training history")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_dir / f"training_history_local_{method_name}.png", dpi=200)
+    plt.close(fig)
+    return str(csv_path)
+
+
 def _run_local_cv(location, df_pairs, df_hind, saved, methods):
     for method_name in methods:
         oof_parts = []
@@ -105,6 +135,7 @@ def _run_local_cv(location, df_pairs, df_hind, saved, methods):
             method.apply(df_hind.copy(), model),
         )
         _save_local_feature_importance(location, method_name, model)
+        _save_local_training_history(location, method_name, model)
 
 
 def _validation_frame(df_base, df_corrected, output_name, meta):

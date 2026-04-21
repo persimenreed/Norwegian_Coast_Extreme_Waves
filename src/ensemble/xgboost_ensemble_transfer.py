@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 
 from src.ensemble.common import (
@@ -187,6 +189,18 @@ def _mean_weight_map(weights, members):
     return {member: float(weights[:, idx].mean()) for idx, member in enumerate(members)}
 
 
+def _save_feature_importance(location, output_name, bundle):
+    importance = bundle.get("feature_importance") if isinstance(bundle, dict) else None
+    if importance is None:
+        return None
+
+    out_dir = Path("results") / "bias_correction" / location
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"feature_importance_moe_{output_name}.csv"
+    importance.to_csv(path, index=False)
+    return str(path)
+
+
 def run(location=None, methods=None, source=None, combined=False, output_name=None):
     setup = build_training_setup(source=None if combined else source, methods=methods)
     methods = setup["methods"]
@@ -238,6 +252,7 @@ def run(location=None, methods=None, source=None, combined=False, output_name=No
         input_families = unique_locations(spec["member_family"] for spec in hindcast_specs)
         family_label = "|".join(input_families)
         contributions.setdefault(target_location, {})["input_families"] = input_families
+        _save_feature_importance(target_location, output_name, bundle)
 
         validation_specs = _target_member_specs(
             target_location,

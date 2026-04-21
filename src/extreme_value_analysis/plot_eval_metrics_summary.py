@@ -5,6 +5,7 @@ import textwrap
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.colors import TwoSlopeNorm
 
 
 ROOT = Path("results/eval_metrics")
@@ -24,6 +25,55 @@ RAW_LOCATION_RMSE_METRICS = [
     "rmse_q995",
 ]
 SUMMARY_LOCATIONS = ["fauskane", "fedjeosen", "vestfjorden"]
+SUMMARY_CASES = [
+    {
+        "key": "local_fauskane",
+        "label": "Local\nFauskane",
+        "location": "fauskane",
+        "kind": "local",
+    },
+    {
+        "key": "local_fedjeosen",
+        "label": "Local\nFedjeosen",
+        "location": "fedjeosen",
+        "kind": "local",
+    },
+    {
+        "key": "transfer_fauskane",
+        "label": "Transfer to\nFauskane",
+        "location": "fauskane",
+        "kind": "transfer",
+        "source": "fedjeosen",
+    },
+    {
+        "key": "transfer_fedjeosen",
+        "label": "Transfer to\nFedjeosen",
+        "location": "fedjeosen",
+        "kind": "transfer",
+        "source": "fauskane",
+    },
+    {
+        "key": "transfer_vestfjorden",
+        "label": "Transfer to\nVestfjorden",
+        "location": "vestfjorden",
+        "kind": "transfer_all",
+    },
+]
+SUMMARY_METHOD_ORDER = {
+    "raw": 0,
+    "linear": 1,
+    "pqm": 2,
+    "dagqm": 3,
+    "gpr": 4,
+    "xgboost": 5,
+    "transformer": 6,
+}
+SUMMARY_BASE_METHODS = ["linear", "pqm", "dagqm", "gpr", "xgboost", "transformer"]
+SUMMARY_MOE_METHODS = ["ensemble_fauskane", "ensemble_fedjeosen", "ensemble_combined"]
+HEATMAP_TITLE_FONTSIZE = 11
+HEATMAP_VALUE_FONTSIZE = 8
+HEATMAP_COLORBAR_FRACTION = 0.02
+HEATMAP_COLORBAR_PAD = 0.08
 
 
 def load_metrics(location: str) -> pd.DataFrame:
@@ -46,19 +96,14 @@ def _location_out_dir(location: str) -> Path:
 
 
 def _method_sort_key(name: str):
-
     if name == "raw":
         return (0, name)
-
     if name.startswith("localcv_"):
         return (1, name)
-
     if name.startswith("transfer_"):
         return (2, name)
-
     if name.startswith("ensemble_"):
         return (3, name)
-
     return (4, name)
 
 
@@ -173,6 +218,35 @@ def _display_method_labels(methods) -> list[str]:
     return [_display_method_name(method) for method in methods]
 
 
+def _pretty_method_label(label: str) -> str:
+    label = str(label)
+    mapping = {
+        "raw": "Raw",
+        "linear": "Linear",
+        "pqm": "PQM",
+        "dagqm": "DAGQM",
+        "gpr": "GPR",
+        "xgboost": "XGBoost",
+        "transformer": "Transformer",
+        "ensemble": "MoE",
+        "MoE": "MoE",
+        "combined": "Combined",
+        "fauskane": "Fauskane",
+        "fedjeosen": "Fedjeosen",
+    }
+
+    if label.startswith("MoE_"):
+        suffix = label.split("_", 1)[1]
+        return f"MoE ({mapping.get(suffix, suffix.title())})"
+
+    if "_" in label:
+        method, source = label.rsplit("_", 1)
+        if source in {"fauskane", "fedjeosen", "combined"}:
+            return f"{mapping.get(method, method.title())} ({mapping.get(source, source.title())})"
+
+    return mapping.get(label, label)
+
+
 def _style_axes(ax):
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -209,23 +283,26 @@ def _plot_raw_rmse_location_summary():
     fig, ax = plt.subplots(
         figsize=(1.2 * len(plot_df.columns) + 2, 0.55 * len(plot_df.index) + 2.2)
     )
-    im = ax.imshow(vals, aspect="auto")
+    vlim = _heatmap_limit([vals], fallback=1.0)
+    norm = TwoSlopeNorm(vmin=-vlim, vcenter=0.0, vmax=vlim)
+    im = ax.imshow(np.ma.masked_invalid(vals), aspect="auto", cmap=_heatmap_cmap(), norm=norm)
 
     ax.set_xticks(np.arange(len(plot_df.columns)))
     ax.set_xticklabels([_display_metric_name(c) for c in plot_df.columns], rotation=30, ha="right")
     ax.set_yticks(np.arange(len(plot_df.index)))
     ax.set_yticklabels(plot_df.index)
+    ax.tick_params(axis="both", labelsize=10)
 
-    norm = im.norm
     for i in range(vals.shape[0]):
         for j in range(vals.shape[1]):
             v = vals[i, j]
-            txt = "nan" if not np.isfinite(v) else f"{v:.3f}"
-            color = "black" if np.isfinite(v) and norm(v) > 0.5 else "white"
-            ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
+            if not np.isfinite(v):
+                continue
+            color = "white" if abs(v) > 0.45 * vlim else "black"
+            ax.text(j, i, f"{v:.3f}", ha="center", va="center", fontsize=HEATMAP_VALUE_FONTSIZE, color=color)
 
-    ax.set_title("")
-    cbar = fig.colorbar(im, ax=ax)
+    ax.set_title("", fontsize=HEATMAP_TITLE_FONTSIZE)
+    cbar = fig.colorbar(im, ax=ax, fraction=HEATMAP_COLORBAR_FRACTION, pad=HEATMAP_COLORBAR_PAD)
     cbar.set_label("")
 
     OUT.mkdir(parents=True, exist_ok=True)
@@ -238,11 +315,6 @@ def _plot_raw_rmse_location_summary():
 
 
 def _build_groups(df, location):
-    """
-    Build plotting groups depending on which methods exist.
-    Special handling for Vestfjorden to avoid massive plots.
-    """
-
     methods = df["method"].tolist()
 
     groups = {}
@@ -279,19 +351,11 @@ def _plot_group_heatmaps(location: str, suffix: str, sub: pd.DataFrame):
     if not rmse_metrics and not exceedance_metrics:
         return
 
-    n_rows = len(display_sub)
-    fig_width = 2.0 * len(rmse_metrics) + 1.8 * len(exceedance_metrics) + 4.5
-    fig_height = 0.48 * n_rows + 2.8
-    fig, axes = plt.subplots(
-        1,
-        2,
-        figsize=(max(8.5, fig_width), max(4.5, fig_height)),
-        gridspec_kw={"width_ratios": [max(1, len(rmse_metrics)), max(1, len(exceedance_metrics))]},
-    )
-
     def draw_heatmap(ax, plot_df, value_fmt, value_suffix="", show_methods=True):
         vals = plot_df.values.astype(float)
-        im = ax.imshow(vals, aspect="auto")
+        vlim = _heatmap_limit([vals], fallback=1.0)
+        norm = TwoSlopeNorm(vmin=-vlim, vcenter=0.0, vmax=vlim)
+        im = ax.imshow(np.ma.masked_invalid(vals), aspect="auto", cmap=_heatmap_cmap(), norm=norm)
 
         ax.set_xticks(np.arange(len(plot_df.columns)))
         ax.set_xticklabels([_display_metric_name(c) for c in plot_df.columns], rotation=30, ha="right")
@@ -301,46 +365,42 @@ def _plot_group_heatmaps(location: str, suffix: str, sub: pd.DataFrame):
         else:
             ax.set_yticklabels([])
             ax.tick_params(axis="y", length=0)
+        ax.tick_params(axis="both", labelsize=10)
 
-        norm = im.norm
         for i in range(vals.shape[0]):
             for j in range(vals.shape[1]):
                 v = vals[i, j]
-                txt = "nan" if not np.isfinite(v) else f"{format(v, value_fmt)}{value_suffix}"
-                color = "black" if np.isfinite(v) and norm(v) > 0.5 else "white"
-                ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
+                if not np.isfinite(v):
+                    continue
+                txt = f"{format(v, value_fmt)}{value_suffix}"
+                color = "white" if abs(v) > 0.45 * vlim else "black"
+                ax.text(j, i, txt, ha="center", va="center", fontsize=HEATMAP_VALUE_FONTSIZE, color=color)
 
         return im
 
-    images = []
+    def save_heatmap(kind, plot_df, value_fmt, colorbar_label, value_suffix=""):
+        n_rows = len(display_sub)
+        fig_width = 2.0 * len(plot_df.columns) + 4.5
+        fig_height = 0.48 * n_rows + 2.8
+        fig, ax = plt.subplots(figsize=(max(6.5, fig_width), max(4.5, fig_height)))
+        im = draw_heatmap(ax, plot_df, value_fmt, value_suffix=value_suffix, show_methods=True)
+        cbar = fig.colorbar(im, ax=ax, fraction=HEATMAP_COLORBAR_FRACTION, pad=HEATMAP_COLORBAR_PAD)
+        cbar.set_label(colorbar_label)
+
+        path = _location_out_dir(location) / f"{location}_metrics_heatmap_{kind}_{suffix}.png"
+        plt.tight_layout()
+        plt.savefig(path, dpi=300, bbox_inches="tight")
+        plt.close()
+
+        print(f"Saved {path}")
+
     if rmse_metrics:
         rmse_plot_df = display_sub.set_index("_display_method")[rmse_metrics].copy()
-        images.append((axes[0], draw_heatmap(axes[0], rmse_plot_df, ".3f", show_methods=True), "RMSE (m)"))
-    else:
-        axes[0].axis("off")
+        save_heatmap("rmse", rmse_plot_df, ".3f", "RMSE (m)")
 
     if exceedance_metrics:
         exceedance_plot_df = 100.0 * display_sub.set_index("_display_method")[exceedance_metrics].copy()
-        images.append(
-            (
-                axes[1],
-                draw_heatmap(axes[1], exceedance_plot_df, ".3f", value_suffix="%", show_methods=False),
-                "Exceedance bias (%)",
-            )
-        )
-    else:
-        axes[1].axis("off")
-
-    for ax, im, label in images:
-        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cbar.set_label(label)
-
-    path = _location_out_dir(location) / f"{location}_metrics_heatmap_{suffix}.png"
-    plt.tight_layout()
-    plt.savefig(path, dpi=300, bbox_inches="tight")
-    plt.close()
-
-    print(f"Saved {path}")
+        save_heatmap("exceedance", exceedance_plot_df, ".3f", "Exceedance bias (%)", value_suffix="%")
 
 
 def plot_heatmap(location: str):
@@ -614,6 +674,274 @@ def plot_vs_obs(location: str):
         _plot_exceedance_bias(location, "transfer", transfer_sub, "Transfer")
 
 
+def _summary_rmse_sort_columns(df: pd.DataFrame):
+    return [col for col in ["rmse_q99", "rmse_q95", "rmse"] if col in df.columns]
+
+
+def _case_method_row(df: pd.DataFrame, case: dict, base_method: str):
+    method_col = df["method"].astype(str)
+
+    if base_method.startswith("ensemble_"):
+        if case["kind"] == "local" and base_method != f"ensemble_{case['location']}":
+            return None
+        if case["kind"] == "transfer" and base_method != f"ensemble_{case['source']}":
+            return None
+        if case["kind"] not in {"local", "transfer", "transfer_all"}:
+            return None
+        sub = df[method_col == base_method].copy()
+        return sub.iloc[0] if not sub.empty else None
+
+    if case["kind"] == "local":
+        target = f"localcv_{base_method}"
+        sub = df[method_col == target].copy()
+        return sub.iloc[0] if not sub.empty else None
+
+    if case["kind"] == "transfer":
+        target = f"transfer_{case['source']}_{base_method}"
+        sub = df[method_col == target].copy()
+        return sub.iloc[0] if not sub.empty else None
+
+    if case["kind"] == "transfer_all":
+        patterns = [
+            f"transfer_fauskane_{base_method}",
+            f"transfer_fedjeosen_{base_method}",
+        ]
+        sub = df[method_col.isin(patterns)].copy()
+        if sub.empty:
+            return None
+        sort_cols = _summary_rmse_sort_columns(sub)
+        if sort_cols:
+            sub = sub.sort_values(sort_cols, ascending=True, na_position="last")
+        return sub.iloc[0]
+
+    return None
+
+
+def _summary_row_methods(include_raw: bool = False, method_group: str = "base"):
+    methods = SUMMARY_MOE_METHODS if method_group == "moe" else SUMMARY_BASE_METHODS
+    return (["raw"] if include_raw else []) + methods
+
+
+def _summary_method_labels(include_raw: bool = False, method_group: str = "base"):
+    return [_pretty_method_label(method) for method in _summary_row_methods(include_raw, method_group)]
+
+
+def _summary_value_matrix(metrics, value_kind: str, metric_name: str, include_raw: bool = False, method_group: str = "base"):
+    row_methods = _summary_row_methods(include_raw, method_group)
+    row_labels = _summary_method_labels(include_raw=include_raw, method_group=method_group)
+    col_labels = [case["label"] for case in SUMMARY_CASES]
+
+    values = np.full((len(row_methods), len(SUMMARY_CASES)), np.nan, dtype=float)
+
+    for j, case in enumerate(SUMMARY_CASES):
+        df = metrics.get(case["location"])
+        if df is None or df.empty:
+            continue
+
+        raw_sub = df[df["method"].astype(str) == "raw"]
+        raw_row = raw_sub.iloc[0] if not raw_sub.empty else None
+
+        for i, method in enumerate(row_methods):
+            if method == "raw":
+                row = raw_row
+            else:
+                row = _case_method_row(df, case, method)
+
+            if row is None:
+                continue
+
+            if value_kind == "improvement":
+                if raw_row is None or metric_name not in row or metric_name not in raw_row:
+                    continue
+                raw_value = float(raw_row[metric_name])
+                value = float(row[metric_name])
+                if np.isfinite(raw_value) and raw_value > 0.0 and np.isfinite(value):
+                    values[i, j] = 100.0 * (raw_value - value) / raw_value
+
+            elif value_kind == "bias":
+                if metric_name not in row:
+                    continue
+                value = float(row[metric_name])
+                if np.isfinite(value):
+                    values[i, j] = 100.0 * value
+
+    return values, row_labels, col_labels
+
+
+def _heatmap_limit(arrays, fallback=1.0):
+    finite = np.concatenate([a[np.isfinite(a)] for a in arrays if np.any(np.isfinite(a))]) if arrays else np.array([])
+    if finite.size == 0:
+        return fallback
+    limit = float(np.nanmax(np.abs(finite)))
+    return max(limit, fallback)
+
+
+def _heatmap_cmap():
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad("white")
+    return cmap
+
+
+def _draw_summary_heatmap(ax, values, row_labels, col_labels, title, vlim, decimals=0):
+    norm = TwoSlopeNorm(vmin=-vlim, vcenter=0.0, vmax=vlim)
+    im = ax.imshow(np.ma.masked_invalid(values), aspect="auto", cmap=_heatmap_cmap(), norm=norm)
+
+    ax.set_title(title, loc="left", fontsize=HEATMAP_TITLE_FONTSIZE)
+    ax.set_xticks(np.arange(len(col_labels)))
+    ax.set_xticklabels(col_labels)
+    ax.set_yticks(np.arange(len(row_labels)))
+    ax.set_yticklabels(row_labels)
+
+    ax.tick_params(axis="both", labelsize=10)
+    ax.tick_params(axis="x", labelrotation=0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    for i in range(values.shape[0]):
+        for j in range(values.shape[1]):
+            v = values[i, j]
+            if not np.isfinite(v):
+                continue
+            txt = f"{v:+.{decimals}f}"
+            color = "white" if abs(v) > 0.45 * vlim else "black"
+            ax.text(j, i, txt, ha="center", va="center", fontsize=HEATMAP_VALUE_FONTSIZE, color=color)
+
+    return im
+
+
+def _plot_overall_rmse_improvement_summary(metrics, method_group: str = "base", filename_suffix: str = ""):
+    metric_specs = [
+        ("rmse", "Overall RMSE improvement"),
+        ("rmse_q95", "RMSE q95 improvement"),
+        ("rmse_q99", "RMSE q99 improvement"),
+    ]
+
+    matrices = []
+    for metric, _ in metric_specs:
+        values, row_labels, col_labels = _summary_value_matrix(
+            metrics,
+            value_kind="improvement",
+            metric_name=metric,
+            include_raw=False,
+            method_group=method_group,
+        )
+        matrices.append(values)
+
+    if not any(np.any(np.isfinite(m)) for m in matrices):
+        return
+
+    range_matrices = matrices.copy()
+    other_group = "base" if method_group == "moe" else "moe"
+    for metric, _ in metric_specs:
+        values, _, _ = _summary_value_matrix(
+            metrics,
+            value_kind="improvement",
+            metric_name=metric,
+            include_raw=False,
+            method_group=other_group,
+        )
+        range_matrices.append(values)
+    vlim = _heatmap_limit(range_matrices, fallback=5.0)
+
+    fig, axes = plt.subplots(
+        len(metric_specs),
+        1,
+        figsize=(9.4, 7.8),
+        sharex=True,
+        sharey=True,
+    )
+
+    if len(metric_specs) == 1:
+        axes = [axes]
+
+    images = []
+    for ax, (metric, title), values in zip(axes, metric_specs, matrices):
+        _, row_labels, col_labels = _summary_value_matrix(
+            metrics,
+            value_kind="improvement",
+            metric_name=metric,
+            include_raw=False,
+            method_group=method_group,
+        )
+        images.append(_draw_summary_heatmap(ax, values, row_labels, col_labels, title, vlim, decimals=1))
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    cbar = fig.colorbar(images[0], ax=axes, fraction=HEATMAP_COLORBAR_FRACTION, pad=HEATMAP_COLORBAR_PAD)
+    cbar.set_label("Improvement relative to raw (%)")
+    path = OUT / f"overall_rmse_improvement_summary{filename_suffix}.png"
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {path}")
+
+
+def _plot_overall_exceedance_bias_summary(metrics, method_group: str = "base", filename_suffix: str = ""):
+    metric_specs = [
+        ("exceed_rate_bias_q95", "Exceedance-rate bias q95"),
+        ("exceed_rate_bias_q99", "Exceedance-rate bias q99"),
+    ]
+
+    include_raw = method_group != "moe"
+    matrices = []
+    for metric, _ in metric_specs:
+        values, row_labels, col_labels = _summary_value_matrix(
+            metrics,
+            value_kind="bias",
+            metric_name=metric,
+            include_raw=include_raw,
+            method_group=method_group,
+        )
+        matrices.append(values)
+
+    if not any(np.any(np.isfinite(m)) for m in matrices):
+        return
+
+    range_matrices = matrices.copy()
+    other_group = "base" if method_group == "moe" else "moe"
+    other_include_raw = other_group != "moe"
+    for metric, _ in metric_specs:
+        values, _, _ = _summary_value_matrix(
+            metrics,
+            value_kind="bias",
+            metric_name=metric,
+            include_raw=other_include_raw,
+            method_group=other_group,
+        )
+        range_matrices.append(values)
+    vlim = _heatmap_limit(range_matrices, fallback=0.5)
+
+    fig, axes = plt.subplots(
+        len(metric_specs),
+        1,
+        figsize=(9.4, 5.8),
+        sharex=True,
+        sharey=True,
+    )
+
+    if len(metric_specs) == 1:
+        axes = [axes]
+
+    images = []
+    for ax, (metric, title), values in zip(axes, metric_specs, matrices):
+        _, row_labels, col_labels = _summary_value_matrix(
+            metrics,
+            value_kind="bias",
+            metric_name=metric,
+            include_raw=include_raw,
+            method_group=method_group,
+        )
+        images.append(_draw_summary_heatmap(ax, values, row_labels, col_labels, title, vlim, decimals=3))
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    cbar = fig.colorbar(images[0], ax=axes, fraction=HEATMAP_COLORBAR_FRACTION, pad=HEATMAP_COLORBAR_PAD)
+    cbar.set_label("Bias vs observed exceedance (percentage points)")
+    path = OUT / f"overall_exceedance_bias_summary{filename_suffix}.png"
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {path}")
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -625,16 +953,22 @@ def main():
 
     args = parser.parse_args()
 
+    loaded_metrics = {}
     for loc in args.locations:
         metrics_path = ROOT / loc / "metrics.csv"
         if not metrics_path.exists():
             print(f"Skipping {loc}: {metrics_path} not found")
             continue
 
+        loaded_metrics[loc] = load_metrics(loc)
         plot_heatmap(loc)
         plot_vs_obs(loc)
 
     _plot_raw_rmse_location_summary()
+    _plot_overall_rmse_improvement_summary(loaded_metrics)
+    _plot_overall_exceedance_bias_summary(loaded_metrics)
+    _plot_overall_rmse_improvement_summary(loaded_metrics, method_group="moe", filename_suffix="_moe")
+    _plot_overall_exceedance_bias_summary(loaded_metrics, method_group="moe", filename_suffix="_moe")
 
 
 if __name__ == "__main__":

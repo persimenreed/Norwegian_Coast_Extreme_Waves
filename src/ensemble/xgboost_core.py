@@ -386,10 +386,15 @@ def fit_state_corrected_ensemble(
         importance_weight += avg_weight
 
     if importance_weight > 0:
-        bundle["top_features"]["gate"] = sorted(
-            zip(gate_feature_names, (importance_sum / importance_weight).tolist()),
-            key=lambda item: item[1],
-            reverse=True,
+        feature_importance = pd.DataFrame(
+            {
+                "feature": gate_feature_names,
+                "importance": importance_sum / importance_weight,
+            }
+        ).sort_values("importance", ascending=False, ignore_index=True)
+        bundle["feature_importance"] = feature_importance
+        bundle["top_features"]["gate"] = list(
+            feature_importance[["feature", "importance"]].itertuples(index=False, name=None)
         )[:10]
 
     return bundle
