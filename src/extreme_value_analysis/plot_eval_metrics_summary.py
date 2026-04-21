@@ -314,7 +314,7 @@ def _plot_raw_rmse_location_summary():
     print(f"Saved {path}")
 
 
-def _build_groups(df, location):
+def _build_groups(df):
     methods = df["method"].tolist()
 
     groups = {}
@@ -406,7 +406,7 @@ def _plot_group_heatmaps(location: str, suffix: str, sub: pd.DataFrame):
 def plot_heatmap(location: str):
     df = load_metrics(location).copy()
 
-    groups = _build_groups(df, location)
+    groups = _build_groups(df)
 
     for suffix, keep in groups.items():
         if suffix == "ensemble":
@@ -481,7 +481,7 @@ def plot_heatmap(location: str):
         _plot_group_heatmaps(location, suffix, sub)
 
 
-def _plot_rmse_vs_obs(imp: pd.DataFrame, location: str, suffix: str, title_prefix: str):
+def _plot_rmse_vs_obs(imp: pd.DataFrame, location: str, suffix: str):
     if imp.empty:
         return
 
@@ -562,7 +562,7 @@ def _build_rmse_table(df: pd.DataFrame, allowed):
     return pd.DataFrame(rows).set_index("method")
 
 
-def _plot_exceedance_bias(location: str, suffix: str, sub: pd.DataFrame, title_prefix: str):
+def _plot_exceedance_bias(location: str, suffix: str, sub: pd.DataFrame):
     metrics = [m for m in EXCEEDANCE_BAR_METRICS if m in sub.columns]
     if len(metrics) < 2:
         return
@@ -645,12 +645,12 @@ def plot_vs_obs(location: str):
         if ensemble_local in df["method"].values:
             local_methods.add(ensemble_local)
         imp_local = _build_rmse_table(df, {"raw"} | local_methods)
-        _plot_rmse_vs_obs(imp_local, location, "local", "Local RMSE")
+        _plot_rmse_vs_obs(imp_local, location, "local")
         local_plot_methods = {"raw"} | local_methods
         local_exceedance_cols = ["method"] + [m for m in EXCEEDANCE_BAR_METRICS if m in df.columns]
         local_sub = df[df["method"].isin(sorted(local_plot_methods, key=_method_sort_key))][local_exceedance_cols].copy()
         if not local_sub.empty:
-            _plot_exceedance_bias(location, "local", local_sub, "Local")
+            _plot_exceedance_bias(location, "local", local_sub)
 
     transfer_methods = {m for m in df["method"].tolist() if m.startswith("transfer_")}
 
@@ -664,14 +664,14 @@ def plot_vs_obs(location: str):
     imp_transfer = _build_rmse_table(df, {"raw"} | transfer_methods)
     if location == "vestfjorden" and not imp_transfer.empty:
         imp_transfer = imp_transfer.rename(index=_vestfjorden_display_method)
-    _plot_rmse_vs_obs(imp_transfer, location, "transfer", "Transfer RMSE")
+    _plot_rmse_vs_obs(imp_transfer, location, "transfer")
     transfer_plot_methods = {"raw"} | transfer_methods
     transfer_exceedance_cols = ["method"] + [m for m in EXCEEDANCE_BAR_METRICS if m in df.columns]
     transfer_sub = df[df["method"].isin(sorted(transfer_plot_methods, key=_method_sort_key))][transfer_exceedance_cols].copy()
     if location == "vestfjorden" and not transfer_sub.empty:
         transfer_sub["method"] = transfer_sub["method"].map(_vestfjorden_display_method)
     if not transfer_sub.empty:
-        _plot_exceedance_bias(location, "transfer", transfer_sub, "Transfer")
+        _plot_exceedance_bias(location, "transfer", transfer_sub)
 
 
 def _summary_rmse_sort_columns(df: pd.DataFrame):

@@ -35,10 +35,28 @@ def dataset_label(d):
     return d
 
 
+def load_comparison_rows(location):
+    path = ROOT / location / "summary_return_levels.csv"
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    df = pd.read_csv(path)
+    df = df[df["model"].isin(MODELS)].copy()
+    df["return_period"] = pd.to_numeric(df["return_period"], errors="coerce")
+
+    raw = df[df["dataset"] == "raw"][
+        ["model", "return_period", "return_level"]
+    ].rename(columns={"return_level": "rl_raw"})
+    corrected = df[df["dataset"] != "raw"][
+        ["dataset", "model", "return_period", "return_level"]
+    ].rename(columns={"return_level": "rl_model"})
+
+    return corrected.merge(raw, on=["model", "return_period"], how="inner")
+
+
 def plot(location, periods, group_name, prefix=None, fixed_datasets=None):
 
-    df = pd.read_csv(ROOT / location / "summary_metrics.csv")
-    df = df[df["model"].isin(MODELS)]
+    df = load_comparison_rows(location)
 
     if fixed_datasets is not None:
         df = df[df["dataset"].isin(fixed_datasets)]
@@ -56,13 +74,8 @@ def plot(location, periods, group_name, prefix=None, fixed_datasets=None):
     else:
         df = df[df["dataset"].astype(str).str.startswith(prefix)]
 
-    obs_col = "rl_obs" if "rl_obs" in df.columns else "rl_raw"
+    obs_col = "rl_raw"
     model_col = "rl_model"
-
-    if obs_col not in df.columns or model_col not in df.columns:
-        raise KeyError(
-            f"Expected columns '{obs_col}' and '{model_col}' in {location}/summary_metrics.csv"
-        )
 
     dataset_order = sorted(df["dataset"].dropna().astype(str).unique().tolist())
     cmap = plt.get_cmap("tab10")

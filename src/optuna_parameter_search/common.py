@@ -33,14 +33,6 @@ EXCEEDANCE_BIAS_SCALE_FLOORS = {
 }
 
 
-def compute_rmse(y_true, y_pred):
-    return rmse(y_pred, y_true)
-
-
-def compute_tail_rmse(y_true, y_pred, q=0.95):
-    return quantile_rmse(y_pred, y_true, q)
-
-
 def compute_objective_components(y_true, y_pred):
     return {
         "rmse": rmse(y_pred, y_true),
@@ -92,7 +84,7 @@ def compute_extreme_metric(y_true, y_pred, baseline_pred=None, weights=None):
     return float(sum(weight * value for weight, value in parts if np.isfinite(value)) / total_weight)
 
 
-def _fit_with_optional_kwargs(method_module, df_train, trial=None, trial_step_offset=0, profile_name=None):
+def _fit_with_optional_kwargs(method_module, df_train, trial_step_offset=0, profile_name=None):
     params = inspect.signature(method_module.fit).parameters
     fit_kwargs = {}
 
@@ -140,7 +132,6 @@ def evaluate_cv(method_module, params, trial=None, source=None, profile_name=Non
             model = _fit_with_optional_kwargs(
                 method_module,
                 df_train,
-                trial=trial,
                 trial_step_offset=fold_id * 1000,
                 profile_name=profile_name,
             )

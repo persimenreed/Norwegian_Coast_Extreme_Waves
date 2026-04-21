@@ -13,7 +13,6 @@ from src.extreme_value_modelling.diagnostics import run as run_diagnostics
 
 from src.extreme_value_modelling.common import (
     append_return_level_summary,
-    build_evt_summary_metrics,
     dataset_name,
 )
 from src.extreme_value_modelling.paths import resolve_input_path
@@ -132,8 +131,6 @@ def run_location(location: str, method: str | None = None, diagnostics: bool = F
             transfer_source=transfer_source,
             diagnostics=diagnostics,
         )
-
-    build_evt_summary_metrics(location)
 
 
 def run_all_for_method(method: str, diagnostics: bool = False):
