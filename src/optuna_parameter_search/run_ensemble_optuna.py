@@ -22,8 +22,10 @@ def make_objective(
     override_profile,
     folds,
     obs_column,
+    baseline_column,
 ):
     y_true = df[obs_column].to_numpy()
+    baseline = df[baseline_column].to_numpy()
 
     def objective(trial):
         tail_weight_q90 = trial.suggest_categorical("tail_weight_q90", [1.0, 1.5, 2.0, 2.5, 3.0])
@@ -73,14 +75,21 @@ def make_objective(
                         bundle,
                     )
 
-                    trial.report(compute_extreme_metric(y_true[test_idx], pred[test_idx]), fold_idx)
+                    trial.report(
+                        compute_extreme_metric(
+                            y_true[test_idx],
+                            pred[test_idx],
+                            baseline_pred=baseline[test_idx],
+                        ),
+                        fold_idx,
+                    )
                     if trial.should_prune():
                         raise optuna.exceptions.TrialPruned()
 
                 if not np.all(np.isfinite(pred)):
                     raise ValueError(f"Failed to generate OOF predictions for {int(np.sum(~np.isfinite(pred)))} rows.")
 
-            return compute_extreme_metric(y_true, pred)
+            return compute_extreme_metric(y_true, pred, baseline_pred=baseline)
         except (RuntimeError, ValueError):
             raise optuna.exceptions.TrialPruned()
 
@@ -101,7 +110,7 @@ def main():
 
     import optuna
 
-    from src.ensemble.common import OBS, grouped_time_folds, load_training_validation_data
+    from src.ensemble.common import MODEL, OBS, grouped_time_folds, load_training_validation_data
     from src.ensemble.xgboost_core import (
         fit_state_corrected_ensemble,
         predict_state_corrected_ensemble,
@@ -143,6 +152,7 @@ def main():
             override_profile,
             ENSEMBLE_OOF_FOLDS,
             OBS,
+            MODEL,
         ),
         n_trials=args.trials,
         callbacks=[EarlyStoppingCallback(patience=150)],

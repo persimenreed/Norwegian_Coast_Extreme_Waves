@@ -11,6 +11,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.model_profiles import override_profile
 from src.settings import get_core_buoy_locations
+from src.eval_metrics.core import exceed_rate_bias, quantile_rmse, rmse
 
 HS_MODEL = "hs"
 HS_OBS = "Significant_Wave_Height_Hm0"
@@ -19,40 +20,72 @@ if len(CORE_BUOYS) != 2:
     raise RuntimeError("Expected exactly two core buoys for spatial CV.")
 
 
+EXTREME_OBJECTIVE_WEIGHTS = {
+    "rmse": 0.10,
+    "rmse_q95": 0.20,
+    "rmse_q99": 0.40,
+    "exceed_rate_bias_q95": 0.10,
+    "exceed_rate_bias_q99": 0.20,
+}
+EXCEEDANCE_BIAS_SCALE_FLOORS = {
+    "exceed_rate_bias_q95": 0.01,
+    "exceed_rate_bias_q99": 0.005,
+}
+
+
 def compute_rmse(y_true, y_pred):
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    mask = np.isfinite(y_true) & np.isfinite(y_pred)
-    return float(np.sqrt(np.mean((y_true[mask] - y_pred[mask]) ** 2))) if np.any(mask) else np.nan
-
-
-def compute_quantile_loss(y_true, y_pred, q=0.95):
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    mask = np.isfinite(y_true) & np.isfinite(y_pred)
-    if not np.any(mask):
-        return np.nan
-    err = y_true[mask] - y_pred[mask]
-    return float(np.mean(np.maximum(q * err, (q - 1) * err)))
+    return rmse(y_pred, y_true)
 
 
 def compute_tail_rmse(y_true, y_pred, q=0.95):
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    mask = np.isfinite(y_true) & np.isfinite(y_pred)
-    if np.sum(mask) < 20:
-        return np.nan
-
-    tail = mask & (y_true >= np.nanquantile(y_true[mask], q))
-    return compute_rmse(y_true[tail], y_pred[tail]) if np.sum(tail) >= 20 else np.nan
+    return quantile_rmse(y_pred, y_true, q)
 
 
-def compute_extreme_metric(y_true, y_pred):
-    parts = [
-        (0.35, compute_rmse(y_true, y_pred)),
-        (0.35, compute_quantile_loss(y_true, y_pred, q=0.95)),
-        (0.30, compute_tail_rmse(y_true, y_pred, q=0.95)),
-    ]
+def compute_objective_components(y_true, y_pred):
+    return {
+        "rmse": rmse(y_pred, y_true),
+        "rmse_q95": quantile_rmse(y_pred, y_true, 0.95),
+        "rmse_q99": quantile_rmse(y_pred, y_true, 0.99),
+        "exceed_rate_bias_q95": exceed_rate_bias(y_pred, y_true, 0.95),
+        "exceed_rate_bias_q99": exceed_rate_bias(y_pred, y_true, 0.99),
+    }
+
+
+def _scale(metric_name, baseline_components):
+    if metric_name.startswith("exceed_rate_bias_q"):
+        baseline_value = baseline_components.get(metric_name, np.nan)
+        floor = EXCEEDANCE_BIAS_SCALE_FLOORS.get(metric_name, 0.01)
+        if np.isfinite(baseline_value):
+            return max(abs(float(baseline_value)), floor)
+        return floor
+
+    baseline_value = baseline_components.get(metric_name, np.nan)
+    if np.isfinite(baseline_value) and abs(float(baseline_value)) > 1e-8:
+        return abs(float(baseline_value))
+    return np.nan
+
+
+def compute_extreme_metric(y_true, y_pred, baseline_pred=None, weights=None):
+    weights = weights or EXTREME_OBJECTIVE_WEIGHTS
+    components = compute_objective_components(y_true, y_pred)
+    baseline_components = (
+        compute_objective_components(y_true, baseline_pred)
+        if baseline_pred is not None
+        else {}
+    )
+
+    parts = []
+    for metric_name, weight in weights.items():
+        value = components.get(metric_name, np.nan)
+        scale = _scale(metric_name, baseline_components)
+        if not np.isfinite(value) or not np.isfinite(scale) or scale <= 0.0:
+            continue
+
+        if metric_name.startswith("exceed_rate_bias_q"):
+            value = abs(float(value))
+
+        parts.append((float(weight), float(value) / float(scale)))
+
     total_weight = sum(weight for weight, value in parts if np.isfinite(value))
     if total_weight == 0:
         return np.nan
@@ -68,8 +101,6 @@ def _fit_with_optional_kwargs(method_module, df_train, trial=None, trial_step_of
     if "settings_name" in params and profile_name is not None:
         fit_kwargs["settings_name"] = profile_name
 
-    if trial is not None and "trial" in params:
-        fit_kwargs["trial"] = trial
     return method_module.fit(df_train, **fit_kwargs)
 
 
@@ -101,8 +132,6 @@ def _cv_splits(source=None):
 
 
 def evaluate_cv(method_module, params, trial=None, source=None, profile_name=None):
-    params_signature = inspect.signature(method_module.fit).parameters
-    has_internal_trial_reporting = trial is not None and "trial" in params_signature
     profile_name = profile_name or method_module.__name__.rsplit(".", 1)[-1]
 
     scores = []
@@ -117,10 +146,14 @@ def evaluate_cv(method_module, params, trial=None, source=None, profile_name=Non
             )
             df_pred = method_module.apply(df_valid.copy(), model)
 
-        score = compute_extreme_metric(df_valid[HS_OBS].to_numpy(), df_pred[HS_MODEL].to_numpy())
+        score = compute_extreme_metric(
+            df_valid[HS_OBS].to_numpy(),
+            df_pred[HS_MODEL].to_numpy(),
+            baseline_pred=df_valid[HS_MODEL].to_numpy(),
+        )
         scores.append(score)
 
-        if trial is not None and not has_internal_trial_reporting:
+        if trial is not None:
             trial.report(float(np.mean(scores)), report_step)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()

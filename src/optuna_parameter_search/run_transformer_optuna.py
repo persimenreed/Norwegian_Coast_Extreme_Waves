@@ -94,7 +94,7 @@ def main():
         study_name=f"transformer_{args.source}_local_cv",
         storage=args.storage,
         startup_trials=12,
-        warmup_steps=5,
+        warmup_steps=2,
         interval_steps=1,
     )
 
