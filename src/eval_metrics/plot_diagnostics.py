@@ -11,21 +11,39 @@ CDF_XMAX_QUANTILE = 0.99
 QQ_MIN_QUANTILE = 0.90
 CDF_QQ_FIGSIZE = (6.5, 4.6)
 METHOD_COLORS = {
+    "Observed": "#000000",
     "buoy": "#000000",
     "raw": "#ff7f0e",
+    "NORA3": "#ff7f0e",
     "MoE": "#2ca02c",
-    "MoE_local": "#2ca02c",
-    "MoE_transfer": "#17becf",
-    "MoE_fauskane": "#2ca02c",
-    "MoE_fedjeosen": "#17becf",
-    "MoE_combined": "#bcbd22",
+    "MoE Local": "#2ca02c",
+    "MoE Transfer": "#4c78a8",
+    "MoE Fauskane": "#2ca02c",
+    "MoE Fedjeosen": "#4c78a8",
+    "MoE Combined": "#bcbd22",
     "dagqm": "#d62728",
+    "DAGQM": "#d62728",
     "linear": "#8c564b",
+    "Linear": "#8c564b",
     "pqm": "#e377c2",
+    "PQM": "#e377c2",
     "gpr": "#7f7f7f",
+    "GPR": "#7f7f7f",
     "transformer": "#9467bd",
+    "Transformer": "#9467bd",
     "xgboost": "#6b6ecf",
+    "XGBoost": "#6b6ecf",
     "1:1": "#111111",
+}
+METHOD_LABELS = {
+    "raw": "NORA3",
+    "buoy": "Observed",
+    "linear": "Linear",
+    "pqm": "PQM",
+    "dagqm": "DAGQM",
+    "gpr": "GPR",
+    "xgboost": "XGBoost",
+    "transformer": "Transformer",
 }
 
 
@@ -36,31 +54,35 @@ def _finite(x):
 
 def _display_name(name):
     name = str(name)
-    if name == "raw":
-        return "raw"
+    if name in METHOD_LABELS:
+        return METHOD_LABELS[name]
     if name == "ensemble":
         return "MoE"
     if name == "ensemble_local":
-        return "MoE_local"
+        return "MoE Local"
     if name == "ensemble_transfer":
-        return "MoE_transfer"
+        return "MoE Transfer"
     if name.startswith("MoE_"):
-        return name
+        suffix = name.split("_", 1)[1]
+        return f"MoE {suffix.title()}"
     if name.startswith("ensemble_"):
         return "MoE"
     if name.startswith("vestfjorden_transfer_"):
         rest = name.replace("vestfjorden_transfer_", "", 1)
         parts = rest.split("_", 1)
         if len(parts) == 2:
-            return f"{parts[1]}_{parts[0]}"
-        return rest
+            method, source = parts[1], parts[0]
+            return f"{METHOD_LABELS.get(method, method.title())}_{source.title()}"
+        return METHOD_LABELS.get(rest, rest.title())
     if name.startswith("localcv_"):
-        return name.replace("localcv_", "", 1)
+        method = name.replace("localcv_", "", 1)
+        return METHOD_LABELS.get(method, method.title())
     if name.startswith("transfer_"):
         rest = name.replace("transfer_", "", 1)
         parts = rest.split("_", 1)
-        return parts[1] if len(parts) == 2 else rest
-    return name
+        method = parts[1] if len(parts) == 2 else rest
+        return METHOD_LABELS.get(method, method.title())
+    return METHOD_LABELS.get(name, name)
 
 
 def _color_for_name(name):
@@ -70,8 +92,21 @@ def _color_for_name(name):
 
 
 def _method_kind(name):
-    display = _display_name(name)
-    base = display.split("_", 1)[0]
+    name = str(name)
+    if name.startswith("vestfjorden_transfer_"):
+        rest = name.replace("vestfjorden_transfer_", "", 1)
+        parts = rest.split("_", 1)
+        base = parts[1] if len(parts) == 2 else rest
+    elif name.startswith("localcv_"):
+        base = name.replace("localcv_", "", 1)
+    elif name.startswith("transfer_"):
+        rest = name.replace("transfer_", "", 1)
+        parts = rest.split("_", 1)
+        base = parts[1] if len(parts) == 2 else rest
+    else:
+        display = _display_name(name)
+        base = display.split("_", 1)[0]
+    base = base.lower()
     if base in CLASSICAL_METHODS:
         return "classical"
     if base in ML_METHODS:
@@ -114,7 +149,12 @@ def _best_by_q99(obs, series_dict, names):
 
 
 def _display_group_name(name):
-    return "MoE" if str(name) == "ensemble" else str(name)
+    mapping = {
+        "ensemble": "MoE",
+        "local": "Local",
+        "transfer": "Transfer",
+    }
+    return mapping.get(str(name), str(name).title())
 
 
 def _selected_distribution_series(obs, series_dict, include_all_ensembles=False):
@@ -158,20 +198,25 @@ def _selected_distribution_series(obs, series_dict, include_all_ensembles=False)
     return selected
 
 
-def _style_for_name(name):
-    if name == "raw":
-        return {"linestyle": "--", "linewidth": 1.8}
+def _is_ensemble_name(name) -> bool:
+    name = str(name)
+    return (
+        name == "ensemble"
+        or name.startswith("ensemble_")
+        or name.startswith("MoE_")
+    )
 
-    if name.startswith("localcv_"):
-        return {"linestyle": "-", "linewidth": 1.4}
 
-    if name.startswith("transfer_"):
-        return {"linestyle": ":", "linewidth": 1.4}
+def _without_ensemble_series(series_dict):
+    return {
+        name: values
+        for name, values in series_dict.items()
+        if not _is_ensemble_name(name)
+    }
 
-    if name.startswith("ensemble_"):
-        return {"linestyle": "-", "linewidth": 2.2}
 
-    return {"linestyle": "-", "linewidth": 1.2}
+def _has_ensemble_series(series_dict) -> bool:
+    return any(_is_ensemble_name(name) for name in series_dict)
 
 
 def _pdf_cdf_style(name, linewidth=1.8):
@@ -262,7 +307,7 @@ def _plot_pdf_single(obs, series_dict, out_path, title_suffix):
     if len(obs) > 10:
         h, edges = np.histogram(obs, bins="fd", density=True)
         c = 0.5 * (edges[:-1] + edges[1:])
-        plt.plot(c, h, label="buoy", linewidth=1.8, alpha=0.90, linestyle="-", color=_color_for_name("buoy"))
+        plt.plot(c, h, label="Observed", linewidth=1.8, alpha=0.90, linestyle="-", color=_color_for_name("buoy"))
 
     for name, values in series_dict.items():
         x = _finite(values)
@@ -295,7 +340,7 @@ def _plot_cdf_single(obs, series_dict, out_path, title_suffix):
         return
 
     p = np.arange(1, len(obs_sorted) + 1) / len(obs_sorted)
-    plt.plot(obs_sorted, p, label="buoy", linewidth=2.4, alpha=0.95, linestyle="-", color=_color_for_name("buoy"))
+    plt.plot(obs_sorted, p, label="Observed", linewidth=2.4, alpha=0.95, linestyle="-", color=_color_for_name("buoy"))
 
     selected = _selected_distribution_series(
         obs_values,
@@ -378,7 +423,7 @@ def _plot_qq_single(obs, series_dict, out_path, title_suffix):
     hi = float(np.nanmax(obs_q))
     plt.plot([lo, hi], [lo, hi], color=_color_for_name("1:1"), linestyle="-", linewidth=1.1, label="1:1")
 
-    plt.xlabel("Buoy quantiles")
+    plt.xlabel("Observed quantiles")
     plt.ylabel("Model quantiles")
     plt.grid(alpha=0.2)
     plt.legend(fontsize=7, ncol=2)
@@ -405,8 +450,8 @@ def _plot_residuals_single(obs, series_dict, out_path, title_suffix):
 
     plt.axhline(0, color="k", linestyle="-", linewidth=1)
 
-    plt.xlabel("Buoy Hs (m)")
-    plt.ylabel("Residual (model − buoy)")
+    plt.xlabel("Observed Hs (m)")
+    plt.ylabel("Residual (model − observed)")
     plt.title(f"Residuals ({_display_group_name(title_suffix)})")
     plt.grid(alpha=0.2)
     plt.legend(fontsize=7, ncol=2)
@@ -434,10 +479,14 @@ def plot_cdf(obs, series_dict, out_dir):
     groups = _split_series_for_eval_plots(series_dict, location)
 
     if groups["local"]:
-        _plot_cdf_single(obs, groups["local"], f"{out_dir}/cdf_local.png", "local")
+        _plot_cdf_single(obs, _without_ensemble_series(groups["local"]), f"{out_dir}/cdf_local.png", "local")
+        if _has_ensemble_series(groups["local"]):
+            _plot_cdf_single(obs, groups["local"], f"{out_dir}/cdf_local_ensemble.png", "local")
 
     if groups["transfer"]:
-        _plot_cdf_single(obs, groups["transfer"], f"{out_dir}/cdf_transfer.png", "transfer")
+        _plot_cdf_single(obs, _without_ensemble_series(groups["transfer"]), f"{out_dir}/cdf_transfer.png", "transfer")
+        if _has_ensemble_series(groups["transfer"]):
+            _plot_cdf_single(obs, groups["transfer"], f"{out_dir}/cdf_transfer_ensemble.png", "transfer")
 
     if groups["ensemble"]:
         _plot_cdf_single(obs, groups["ensemble"], f"{out_dir}/cdf_ensemble.png", "ensemble")
@@ -448,10 +497,14 @@ def plot_qq(obs, series_dict, out_dir):
     groups = _split_series_for_eval_plots(series_dict, location)
 
     if groups["local"]:
-        _plot_qq_single(obs, groups["local"], f"{out_dir}/qq_local.png", "local")
+        _plot_qq_single(obs, _without_ensemble_series(groups["local"]), f"{out_dir}/qq_local.png", "local")
+        if _has_ensemble_series(groups["local"]):
+            _plot_qq_single(obs, groups["local"], f"{out_dir}/qq_local_ensemble.png", "local")
 
     if groups["transfer"]:
-        _plot_qq_single(obs, groups["transfer"], f"{out_dir}/qq_transfer.png", "transfer")
+        _plot_qq_single(obs, _without_ensemble_series(groups["transfer"]), f"{out_dir}/qq_transfer.png", "transfer")
+        if _has_ensemble_series(groups["transfer"]):
+            _plot_qq_single(obs, groups["transfer"], f"{out_dir}/qq_transfer_ensemble.png", "transfer")
 
     if groups["ensemble"]:
         _plot_qq_single(obs, groups["ensemble"], f"{out_dir}/qq_ensemble.png", "ensemble")

@@ -43,8 +43,35 @@ def _pairs_series(location):
 
     df = load_pairs(location)
     if MODEL_COL not in df.columns or OBS_COL not in df.columns:
-        raise ValueError("Pairs file must contain raw model hs and observed Hs columns.")
+        raise ValueError("Pairs file must contain NORA3 hs and observed Hs columns.")
     return df[MODEL_COL].to_numpy(), df[OBS_COL].to_numpy()
+
+
+def _display_method_name(name):
+    name = str(name)
+    labels = {
+        "raw": "NORA3",
+        "linear": "Linear",
+        "pqm": "PQM",
+        "dagqm": "DAGQM",
+        "gpr": "GPR",
+        "xgboost": "XGBoost",
+        "transformer": "Transformer",
+    }
+    if name == "ensemble":
+        return "MoE"
+    if name.startswith("ensemble_"):
+        suffix = name.replace("ensemble_", "", 1)
+        return f"MoE {suffix.title()}"
+    if name.startswith("localcv_"):
+        method = name.replace("localcv_", "", 1)
+        return labels.get(method, method.title())
+    if name.startswith("transfer_"):
+        rest = name.replace("transfer_", "", 1)
+        parts = rest.split("_", 1)
+        method = parts[1] if len(parts) == 2 else rest
+        return labels.get(method, method.title())
+    return labels.get(name, name)
 
 
 def _validation_runs(location):
@@ -102,7 +129,9 @@ def run(location):
         plot_residuals(obs_for_plots, series, out_dir)
 
     print("\nEvaluation metrics:\n")
-    print(metrics)
+    display_metrics = metrics.copy()
+    display_metrics.index = [_display_method_name(method) for method in display_metrics.index]
+    print(display_metrics)
     print(f"\nSaved results in {out_dir}")
 
 
