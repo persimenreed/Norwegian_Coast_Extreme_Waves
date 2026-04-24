@@ -353,38 +353,61 @@ def quantile_bias_features(values, mapping, reference_values=None, eps=1e-4):
 
 def augment_quantile_features(df, raw_values, transform_cfg, reference_values=None):
     out = df.copy()
+
+    ref = (
+        reference_values
+        if reference_values is not None
+        else transform_cfg.get("quantile_reference_values", raw_values)
+    )
+
     extras = quantile_bias_features(
         raw_values,
         transform_cfg["quantile_mapping"],
-        reference_values=reference_values if reference_values is not None else raw_values,
+        reference_values=ref,
         eps=float(transform_cfg.get("eps", 1e-4)),
     )
+
     for column, values in extras.items():
         out[column] = values
+
     return out, extras
 
 
-def build_target_transform(obs_values, raw_values, cfg):
+def build_target_transform(obs_values, raw_values, cfg, fit_mask=None):
     obs = np.asarray(obs_values, dtype=np.float32)
     raw = np.asarray(raw_values, dtype=np.float32)
     eps = np.float32(cfg_float(cfg, "target_eps", 1e-4))
 
+    finite = np.isfinite(obs) & np.isfinite(raw)
+    if fit_mask is None:
+        mapping_mask = finite
+    else:
+        mapping_mask = np.asarray(fit_mask, dtype=bool) & finite
+
+    if np.sum(mapping_mask) < 20:
+        raise ValueError("Too few valid samples for quantile target transform.")
+
+    reference_values = raw[mapping_mask].astype(np.float32)
+
     mapping = build_quantile_bias_mapping(
-        raw,
-        obs,
+        raw[mapping_mask],
+        obs[mapping_mask],
         n_quantiles=int(cfg.get("quantile_grid_size", 401)),
         p_min=float(cfg.get("quantile_p_min", 1e-3)),
         p_max=float(cfg.get("quantile_p_max", 0.999)),
         tail_cfg=cfg,
     )
+
     extras = quantile_bias_features(
         raw,
         mapping,
-        reference_values=raw,
+        reference_values=reference_values,
         eps=float(eps),
     )
+
     baseline = extras[HS_QUANTILE_BASELINE]
     valid = np.isfinite(obs) & np.isfinite(baseline)
+
     return (
         (obs - baseline).astype(np.float32),
         valid,
@@ -392,6 +415,7 @@ def build_target_transform(obs_values, raw_values, cfg):
             "mode": "quantile_residual",
             "eps": float(eps),
             "quantile_mapping": mapping,
+            "quantile_reference_values": reference_values,
             "quantile_bias_mode": "additive",
             "tail_residual_protection_enabled": bool(
                 cfg.get("tail_residual_protection_enabled", False)

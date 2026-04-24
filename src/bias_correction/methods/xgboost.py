@@ -70,7 +70,7 @@ def fit(df, settings_name=None):
     raw = numeric_values(work, HS_MODEL, dtype="float32")
     target, valid_target, transform_cfg = build_target_transform(obs, raw, cfg)
 
-    work, _ = augment_quantile_features(work, raw, transform_cfg, reference_values=raw)
+    work, _ = augment_quantile_features(work, raw, transform_cfg)
 
     features = resolve_feature_columns(work, cfg.get("features"))
     features = quantile_feature_columns(features)
@@ -123,7 +123,6 @@ def apply(df, bundle):
         prepared,
         raw,
         transform_cfg,
-        reference_values=raw,
     )
     base_values = extras[HS_QUANTILE_BASELINE]
     quantiles = extras[HS_QUANTILE]

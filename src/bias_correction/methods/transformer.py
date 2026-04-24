@@ -267,22 +267,14 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
     work = prepare_ml_dataframe(sort_frame(df))
     obs_values = numeric_values(work, HS_OBS, dtype=np.float32)
     raw_values = numeric_values(work, HS_MODEL, dtype=np.float32)
-    target, valid_target, transform_cfg = build_target_transform(obs_values, raw_values, cfg)
-    work, quantile_extras = augment_quantile_features(
-        work,
-        raw_values,
-        transform_cfg,
-        reference_values=raw_values,
-    )
-
-    features = resolve_feature_columns(work, cfg.get("features"))
-    features = quantile_feature_columns(features)
 
     sequence_length = cfg_int(cfg, "sequence_length", 24)
-    valid_positions = np.flatnonzero(valid_target)
     min_train = cfg_int(cfg, "min_train_samples", 80)
     min_val = cfg_int(cfg, "min_val_samples", 20)
     val_fraction = cfg_float(cfg, "validation_fraction", 0.2)
+
+    preliminary_valid = np.isfinite(obs_values) & np.isfinite(raw_values)
+    valid_positions = np.flatnonzero(preliminary_valid)
 
     if len(valid_positions) < min_train:
         raise ValueError("Too few valid samples for transformer.")
@@ -293,6 +285,25 @@ def fit(df, trial=None, trial_step_offset=0, settings_name=None):
     )
     train_positions = valid_positions[:-n_val] if n_val > 0 else valid_positions
     val_positions = valid_positions[-n_val:] if n_val > 0 else np.array([], dtype=int)
+
+    transform_fit_mask = np.zeros(len(work), dtype=bool)
+    transform_fit_mask[train_positions] = True
+
+    target, valid_target, transform_cfg = build_target_transform(
+        obs_values,
+        raw_values,
+        cfg,
+        fit_mask=transform_fit_mask,
+    )
+
+    work, quantile_extras = augment_quantile_features(
+        work,
+        raw_values,
+        transform_cfg,
+    )
+
+    features = resolve_feature_columns(work, cfg.get("features"))
+    features = quantile_feature_columns(features)
 
     fit_mask = np.zeros(len(work), dtype=bool)
     fit_mask[train_positions] = True
@@ -475,7 +486,6 @@ def apply(df, bundle):
         prepared,
         hs,
         transform_cfg,
-        reference_values=hs,
     )
     base_values = extras[HS_QUANTILE_BASELINE]
     quantiles = extras[HS_QUANTILE]
