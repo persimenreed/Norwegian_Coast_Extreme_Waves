@@ -5,7 +5,7 @@ import textwrap
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.colors import TwoSlopeNorm
+from matplotlib.colors import Normalize, TwoSlopeNorm
 
 
 ROOT = Path("results/eval_metrics")
@@ -70,10 +70,24 @@ SUMMARY_METHOD_ORDER = {
 }
 SUMMARY_BASE_METHODS = ["linear", "pqm", "dagqm", "gpr", "xgboost", "transformer"]
 SUMMARY_MOE_METHODS = ["ensemble_fauskane", "ensemble_fedjeosen", "ensemble_combined"]
-HEATMAP_TITLE_FONTSIZE = 11
-HEATMAP_VALUE_FONTSIZE = 8
+HEATMAP_TITLE_FONTSIZE = 13
+HEATMAP_VALUE_FONTSIZE = 13
+HEATMAP_TICK_FONTSIZE = 11
+OVERALL_HEATMAP_TITLE_FONTSIZE = 11
+OVERALL_HEATMAP_VALUE_FONTSIZE = 8
+OVERALL_HEATMAP_TICK_FONTSIZE = 10
 HEATMAP_COLORBAR_FRACTION = 0.02
 HEATMAP_COLORBAR_PAD = 0.08
+METHOD_LABELS = {
+    "raw": "NORA3",
+    "buoy": "Observed",
+    "linear": "Linear",
+    "pqm": "PQM",
+    "dagqm": "DAGQM",
+    "gpr": "GPR",
+    "xgboost": "XGBoost",
+    "transformer": "Transformer",
+}
 
 
 def load_metrics(location: str) -> pd.DataFrame:
@@ -161,27 +175,34 @@ def _display_metric_name(metric: str) -> str:
 
 def _display_method_name(name: str) -> str:
     name = str(name)
+    if name in METHOD_LABELS:
+        return METHOD_LABELS[name]
     if name == "ensemble":
         return "MoE"
     if name in {"ensemble_local", "ensemble_transfer"}:
-        return name.replace("ensemble", "MoE")
+        suffix = name.replace("ensemble_", "", 1).title()
+        return f"MoE {suffix}"
     if name.startswith("MoE_"):
-        return name
+        suffix = name.split("_", 1)[1]
+        return f"MoE {suffix.title()}"
     if name.startswith("vestfjorden_transfer_"):
         rest = name.replace("vestfjorden_transfer_", "", 1)
         parts = rest.split("_", 1)
         if len(parts) == 2:
-            return f"{parts[1]}_{parts[0]}"
-        return rest
+            method, source = parts[1], parts[0]
+            return f"{METHOD_LABELS.get(method, method.title())} ({source.title()})"
+        return METHOD_LABELS.get(rest, rest.title())
     if name.startswith("ensemble_"):
         return "MoE"
     if name.startswith("localcv_"):
-        return name[len("localcv_"):]
+        method = name[len("localcv_"):]
+        return METHOD_LABELS.get(method, method.title())
     if name.startswith("transfer_"):
         rest = name[len("transfer_"):]
         parts = rest.split("_", 1)
-        return parts[1] if len(parts) == 2 else rest
-    return name
+        method = parts[1] if len(parts) == 2 else rest
+        return METHOD_LABELS.get(method, method.title())
+    return METHOD_LABELS.get(name, name)
 
 
 def _ensemble_local_transfer_methods(df: pd.DataFrame, location: str):
@@ -221,7 +242,8 @@ def _display_method_labels(methods) -> list[str]:
 def _pretty_method_label(label: str) -> str:
     label = str(label)
     mapping = {
-        "raw": "Raw",
+        "raw": "NORA3",
+        "buoy": "Observed",
         "linear": "Linear",
         "pqm": "PQM",
         "dagqm": "DAGQM",
@@ -283,22 +305,22 @@ def _plot_raw_rmse_location_summary():
     fig, ax = plt.subplots(
         figsize=(1.2 * len(plot_df.columns) + 2, 0.55 * len(plot_df.index) + 2.2)
     )
-    vlim = _heatmap_limit([vals], fallback=1.0)
-    norm = TwoSlopeNorm(vmin=-vlim, vcenter=0.0, vmax=vlim)
-    im = ax.imshow(np.ma.masked_invalid(vals), aspect="auto", cmap=_heatmap_cmap(), norm=norm)
+    vmax = _positive_heatmap_limit([vals], fallback=1.0)
+    norm = Normalize(vmin=0.0, vmax=vmax)
+    im = ax.imshow(np.ma.masked_invalid(vals), aspect="auto", cmap=_rmse_heatmap_cmap(), norm=norm)
 
     ax.set_xticks(np.arange(len(plot_df.columns)))
     ax.set_xticklabels([_display_metric_name(c) for c in plot_df.columns], rotation=30, ha="right")
     ax.set_yticks(np.arange(len(plot_df.index)))
-    ax.set_yticklabels(plot_df.index)
-    ax.tick_params(axis="both", labelsize=10)
+    ax.set_yticklabels([str(location).title() for location in plot_df.index])
+    ax.tick_params(axis="both", labelsize=HEATMAP_TICK_FONTSIZE)
 
     for i in range(vals.shape[0]):
         for j in range(vals.shape[1]):
             v = vals[i, j]
             if not np.isfinite(v):
                 continue
-            color = "white" if abs(v) > 0.45 * vlim else "black"
+            color = "white" if v > 0.55 * vmax else "black"
             ax.text(j, i, f"{v:.3f}", ha="center", va="center", fontsize=HEATMAP_VALUE_FONTSIZE, color=color)
 
     ax.set_title("", fontsize=HEATMAP_TITLE_FONTSIZE)
@@ -341,31 +363,48 @@ def _sort_group(sub: pd.DataFrame, preferred_metric: str) -> pd.DataFrame:
     return sub.sort_values("method", key=lambda s: s.map(_method_sort_key))
 
 
-def _plot_group_heatmaps(location: str, suffix: str, sub: pd.DataFrame):
+def _plot_group_heatmaps(location: str, suffix: str, sub: pd.DataFrame, plot_kinds=None):
     display_sub = sub.copy()
     if "_display_method" not in display_sub.columns:
         display_sub["_display_method"] = display_sub["method"].astype(str)
+
+    if plot_kinds is None:
+        plot_kinds = {"rmse", "exceedance"}
+    else:
+        plot_kinds = set(plot_kinds)
 
     rmse_metrics = [m for m in RMSE_HEATMAP_METRICS if m in sub.columns]
     exceedance_metrics = [m for m in EXCEEDANCE_HEATMAP_METRICS if m in sub.columns]
     if not rmse_metrics and not exceedance_metrics:
         return
 
-    def draw_heatmap(ax, plot_df, value_fmt, value_suffix="", show_methods=True):
+    use_minipage_layout = suffix == "ensemble"
+    minipage_n_cols = max(len(rmse_metrics), len(exceedance_metrics), 1)
+
+    def draw_heatmap(ax, plot_df, value_fmt, value_suffix="", show_methods=True, signed=True):
         vals = plot_df.values.astype(float)
-        vlim = _heatmap_limit([vals], fallback=1.0)
-        norm = TwoSlopeNorm(vmin=-vlim, vcenter=0.0, vmax=vlim)
-        im = ax.imshow(np.ma.masked_invalid(vals), aspect="auto", cmap=_heatmap_cmap(), norm=norm)
+        if signed:
+            vlim = _heatmap_limit([vals], fallback=1.0)
+            norm = TwoSlopeNorm(vmin=-vlim, vcenter=0.0, vmax=vlim)
+            cmap = _heatmap_cmap()
+        else:
+            vlim = _positive_heatmap_limit([vals], fallback=1.0)
+            norm = Normalize(vmin=0.0, vmax=vlim)
+            cmap = _rmse_heatmap_cmap()
+        im = ax.imshow(np.ma.masked_invalid(vals), aspect="auto", cmap=cmap, norm=norm)
 
         ax.set_xticks(np.arange(len(plot_df.columns)))
-        ax.set_xticklabels([_display_metric_name(c) for c in plot_df.columns], rotation=30, ha="right")
+        if use_minipage_layout:
+            ax.set_xticklabels([_display_metric_name(c) for c in plot_df.columns], rotation=0, ha="center")
+        else:
+            ax.set_xticklabels([_display_metric_name(c) for c in plot_df.columns], rotation=30, ha="right")
         ax.set_yticks(np.arange(len(plot_df.index)))
         if show_methods:
             ax.set_yticklabels([_display_method_name(idx) for idx in plot_df.index])
         else:
             ax.set_yticklabels([])
             ax.tick_params(axis="y", length=0)
-        ax.tick_params(axis="both", labelsize=10)
+        ax.tick_params(axis="both", labelsize=HEATMAP_TICK_FONTSIZE)
 
         for i in range(vals.shape[0]):
             for j in range(vals.shape[1]):
@@ -373,32 +412,37 @@ def _plot_group_heatmaps(location: str, suffix: str, sub: pd.DataFrame):
                 if not np.isfinite(v):
                     continue
                 txt = f"{format(v, value_fmt)}{value_suffix}"
-                color = "white" if abs(v) > 0.45 * vlim else "black"
+                if signed:
+                    color = "white" if abs(v) > 0.45 * vlim else "black"
+                else:
+                    color = "white" if v > 0.55 * vlim else "black"
                 ax.text(j, i, txt, ha="center", va="center", fontsize=HEATMAP_VALUE_FONTSIZE, color=color)
 
         return im
 
-    def save_heatmap(kind, plot_df, value_fmt, colorbar_label, value_suffix=""):
+    def save_heatmap(kind, plot_df, value_fmt, colorbar_label, value_suffix="", signed=True):
         n_rows = len(display_sub)
-        fig_width = 2.0 * len(plot_df.columns) + 4.5
+        n_cols_for_layout = minipage_n_cols if use_minipage_layout else len(plot_df.columns)
+        fig_width = 2.0 * n_cols_for_layout + 4.5
         fig_height = 0.48 * n_rows + 2.8
         fig, ax = plt.subplots(figsize=(max(6.5, fig_width), max(4.5, fig_height)))
-        im = draw_heatmap(ax, plot_df, value_fmt, value_suffix=value_suffix, show_methods=True)
+        im = draw_heatmap(ax, plot_df, value_fmt, value_suffix=value_suffix, show_methods=True, signed=signed)
         cbar = fig.colorbar(im, ax=ax, fraction=HEATMAP_COLORBAR_FRACTION, pad=HEATMAP_COLORBAR_PAD)
         cbar.set_label(colorbar_label)
 
         path = _location_out_dir(location) / f"{location}_metrics_heatmap_{kind}_{suffix}.png"
         plt.tight_layout()
-        plt.savefig(path, dpi=300, bbox_inches="tight")
+        save_kwargs = {} if use_minipage_layout else {"bbox_inches": "tight"}
+        plt.savefig(path, dpi=300, **save_kwargs)
         plt.close()
 
         print(f"Saved {path}")
 
-    if rmse_metrics:
+    if rmse_metrics and "rmse" in plot_kinds:
         rmse_plot_df = display_sub.set_index("_display_method")[rmse_metrics].copy()
-        save_heatmap("rmse", rmse_plot_df, ".3f", "RMSE (m)")
+        save_heatmap("rmse", rmse_plot_df, ".3f", "RMSE (m)", signed=False)
 
-    if exceedance_metrics:
+    if exceedance_metrics and "exceedance" in plot_kinds:
         exceedance_plot_df = 100.0 * display_sub.set_index("_display_method")[exceedance_metrics].copy()
         save_heatmap("exceedance", exceedance_plot_df, ".3f", "Exceedance bias (%)", value_suffix="%")
 
@@ -455,29 +499,58 @@ def plot_heatmap(location: str):
 
             continue
 
-        if location == "vestfjorden" and suffix == "transfer":
-            keep.extend([m for m in df["method"].astype(str) if m.startswith("ensemble_")])
+        base_keep = sorted(set(keep), key=_method_sort_key)
 
-        elif suffix in {"localcv", "transfer"}:
-            ensemble_method = _ensemble_method_for_group(df, location, suffix)
-            if ensemble_method:
-                keep.append(ensemble_method)
+        if suffix in {"localcv", "transfer"}:
+            ensemble_methods = []
+            if location == "vestfjorden" and suffix == "transfer":
+                ensemble_methods = [m for m in df["method"].astype(str) if m.startswith("ensemble_")]
+            else:
+                ensemble_method = _ensemble_method_for_group(df, location, suffix)
+                if ensemble_method:
+                    ensemble_methods = [ensemble_method]
 
-        keep = sorted(set(keep), key=_method_sort_key)
+            rmse_keep = base_keep
+            sub = df[df["method"].isin(rmse_keep)].copy()
+            if not sub.empty:
+                sub = _sort_group(sub, "rmse_q99")
+                sub["_display_method"] = sub["method"].astype(str)
+                if location == "vestfjorden" and suffix == "transfer":
+                    sub["_display_method"] = sub["method"].map(_vestfjorden_display_method)
+                _plot_group_heatmaps(location, suffix, sub, plot_kinds={"rmse"})
 
-        sub = df[df["method"].isin(keep)].copy()
+            if ensemble_methods:
+                rmse_ensemble_keep = sorted(set(base_keep + ensemble_methods), key=_method_sort_key)
+                sub = df[df["method"].isin(rmse_ensemble_keep)].copy()
+                if not sub.empty:
+                    sub = _sort_group(sub, "rmse_q99")
+                    sub["_display_method"] = sub["method"].astype(str)
+                    if location == "vestfjorden" and suffix == "transfer":
+                        sub["_display_method"] = sub["method"].map(_vestfjorden_display_method)
+                    elif location != "vestfjorden":
+                        sub.loc[sub["method"] == ensemble_methods[0], "_display_method"] = "ensemble"
+                    _plot_group_heatmaps(location, f"{suffix}_ensemble", sub, plot_kinds={"rmse"})
+
+            exceedance_keep = sorted(set(base_keep + ensemble_methods), key=_method_sort_key)
+            sub = df[df["method"].isin(exceedance_keep)].copy()
+            if not sub.empty:
+                sub = _sort_group(sub, "rmse_q99")
+                sub["_display_method"] = sub["method"].astype(str)
+                if location == "vestfjorden" and suffix == "transfer":
+                    sub["_display_method"] = sub["method"].map(_vestfjorden_display_method)
+                elif ensemble_methods and location != "vestfjorden":
+                    sub.loc[sub["method"] == ensemble_methods[0], "_display_method"] = "ensemble"
+                _plot_group_heatmaps(location, suffix, sub, plot_kinds={"exceedance"})
+
+            continue
+
+        sub = df[df["method"].isin(base_keep)].copy()
 
         if sub.empty:
             continue
 
         sub = _sort_group(sub, "rmse_q99")
         sub["_display_method"] = sub["method"].astype(str)
-        if location == "vestfjorden" and suffix == "transfer":
-            sub["_display_method"] = sub["method"].map(_vestfjorden_display_method)
-        if suffix in {"localcv", "transfer"}:
-            ensemble_method = _ensemble_method_for_group(df, location, suffix)
-            if ensemble_method and location != "vestfjorden":
-                sub.loc[sub["method"] == ensemble_method, "_display_method"] = "ensemble"
         _plot_group_heatmaps(location, suffix, sub)
 
 
@@ -637,7 +710,7 @@ def plot_vs_obs(location: str):
     df = load_metrics(location).copy()
 
     if "raw" not in df["method"].values:
-        raise ValueError(f"No raw row found for {location}")
+        raise ValueError(f"No NORA3 row found for {location}")
 
     if location != "vestfjorden":
         local_methods = {m for m in df["method"].tolist() if m.startswith("localcv_")}
@@ -726,6 +799,22 @@ def _summary_method_labels(include_raw: bool = False, method_group: str = "base"
     return [_pretty_method_label(method) for method in _summary_row_methods(include_raw, method_group)]
 
 
+def _order_summary_rows(values, row_methods, row_labels, col_labels, value_kind: str):
+    try:
+        ref_idx = col_labels.index("Local\nFauskane")
+    except ValueError:
+        return values, row_methods, row_labels
+
+    ref_values = values[:, ref_idx]
+    if value_kind == "bias":
+        primary = np.where(np.isfinite(ref_values), np.abs(ref_values), np.inf)
+    else:
+        primary = np.where(np.isfinite(ref_values), ref_values, np.inf)
+
+    order = np.lexsort((np.arange(len(row_methods)), primary))
+    return values[order], [row_methods[i] for i in order], [row_labels[i] for i in order]
+
+
 def _summary_value_matrix(metrics, value_kind: str, metric_name: str, include_raw: bool = False, method_group: str = "base"):
     row_methods = _summary_row_methods(include_raw, method_group)
     row_labels = _summary_method_labels(include_raw=include_raw, method_group=method_group)
@@ -756,7 +845,7 @@ def _summary_value_matrix(metrics, value_kind: str, metric_name: str, include_ra
                 raw_value = float(raw_row[metric_name])
                 value = float(row[metric_name])
                 if np.isfinite(raw_value) and raw_value > 0.0 and np.isfinite(value):
-                    values[i, j] = 100.0 * (raw_value - value) / raw_value
+                    values[i, j] = 100.0 * (value - raw_value) / raw_value
 
             elif value_kind == "bias":
                 if metric_name not in row:
@@ -776,23 +865,45 @@ def _heatmap_limit(arrays, fallback=1.0):
     return max(limit, fallback)
 
 
+def _positive_heatmap_limit(arrays, fallback=1.0):
+    finite = np.concatenate([a[np.isfinite(a)] for a in arrays if np.any(np.isfinite(a))]) if arrays else np.array([])
+    if finite.size == 0:
+        return fallback
+    limit = float(np.nanmax(finite))
+    return max(limit, fallback)
+
+
 def _heatmap_cmap():
+    cmap = plt.get_cmap("RdBu").copy()
+    cmap.set_bad("white")
+    return cmap
+
+
+def _rmse_heatmap_cmap():
+    cmap = plt.get_cmap("YlGnBu").copy()
+    cmap.set_bad("white")
+    return cmap
+
+
+def _summary_rmse_cmap():
     cmap = plt.get_cmap("RdBu_r").copy()
     cmap.set_bad("white")
     return cmap
 
 
-def _draw_summary_heatmap(ax, values, row_labels, col_labels, title, vlim, decimals=0):
+def _draw_summary_heatmap(ax, values, row_labels, col_labels, title, vlim, decimals=0, cmap=None):
     norm = TwoSlopeNorm(vmin=-vlim, vcenter=0.0, vmax=vlim)
-    im = ax.imshow(np.ma.masked_invalid(values), aspect="auto", cmap=_heatmap_cmap(), norm=norm)
+    if cmap is None:
+        cmap = _heatmap_cmap()
+    im = ax.imshow(np.ma.masked_invalid(values), aspect="auto", cmap=cmap, norm=norm)
 
-    ax.set_title(title, loc="left", fontsize=HEATMAP_TITLE_FONTSIZE)
+    ax.set_title(title, loc="left", fontsize=OVERALL_HEATMAP_TITLE_FONTSIZE)
     ax.set_xticks(np.arange(len(col_labels)))
     ax.set_xticklabels(col_labels)
     ax.set_yticks(np.arange(len(row_labels)))
     ax.set_yticklabels(row_labels)
 
-    ax.tick_params(axis="both", labelsize=10)
+    ax.tick_params(axis="both", labelsize=OVERALL_HEATMAP_TICK_FONTSIZE)
     ax.tick_params(axis="x", labelrotation=0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -804,16 +915,16 @@ def _draw_summary_heatmap(ax, values, row_labels, col_labels, title, vlim, decim
                 continue
             txt = f"{v:+.{decimals}f}"
             color = "white" if abs(v) > 0.45 * vlim else "black"
-            ax.text(j, i, txt, ha="center", va="center", fontsize=HEATMAP_VALUE_FONTSIZE, color=color)
+            ax.text(j, i, txt, ha="center", va="center", fontsize=OVERALL_HEATMAP_VALUE_FONTSIZE, color=color)
 
     return im
 
 
 def _plot_overall_rmse_improvement_summary(metrics, method_group: str = "base", filename_suffix: str = ""):
     metric_specs = [
-        ("rmse", "Overall RMSE improvement"),
-        ("rmse_q95", "RMSE q95 improvement"),
-        ("rmse_q99", "RMSE q99 improvement"),
+        ("rmse", "Overall RMSE change vs NORA3"),
+        ("rmse_q95", "RMSE q95 change vs NORA3"),
+        ("rmse_q99", "RMSE q99 change vs NORA3"),
     ]
 
     matrices = []
@@ -863,12 +974,23 @@ def _plot_overall_rmse_improvement_summary(metrics, method_group: str = "base", 
             include_raw=False,
             method_group=method_group,
         )
-        images.append(_draw_summary_heatmap(ax, values, row_labels, col_labels, title, vlim, decimals=1))
+        images.append(
+            _draw_summary_heatmap(
+                ax,
+                values,
+                row_labels,
+                col_labels,
+                title,
+                vlim,
+                decimals=1,
+                cmap=_summary_rmse_cmap(),
+            )
+        )
 
     OUT.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     cbar = fig.colorbar(images[0], ax=axes, fraction=HEATMAP_COLORBAR_FRACTION, pad=HEATMAP_COLORBAR_PAD)
-    cbar.set_label("Improvement relative to raw (%)")
+    cbar.set_label("Relative change vs NORA3 (%)")
     path = OUT / f"overall_rmse_improvement_summary{filename_suffix}.png"
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -881,7 +1003,7 @@ def _plot_overall_exceedance_bias_summary(metrics, method_group: str = "base", f
         ("exceed_rate_bias_q99", "Exceedance-rate bias q99"),
     ]
 
-    include_raw = method_group != "moe"
+    include_raw = True
     matrices = []
     for metric, _ in metric_specs:
         values, row_labels, col_labels = _summary_value_matrix(
@@ -898,7 +1020,7 @@ def _plot_overall_exceedance_bias_summary(metrics, method_group: str = "base", f
 
     range_matrices = matrices.copy()
     other_group = "base" if method_group == "moe" else "moe"
-    other_include_raw = other_group != "moe"
+    other_include_raw = True
     for metric, _ in metric_specs:
         values, _, _ = _summary_value_matrix(
             metrics,

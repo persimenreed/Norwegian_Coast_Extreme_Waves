@@ -13,7 +13,6 @@ HS_COLUMN = "hs"
 THRESHOLD_QUANTILE = 0.95
 DECLUSTER_HOURS = 48.0
 RETURN_PERIOD_GRID = np.arange(1, 51, dtype=float)
-SUMMARY_RETURN_PERIODS = (10, 20, 50)
 BOOTSTRAP_SAMPLES = 1000
 CONF_LEVEL = 0.95
 
@@ -101,60 +100,3 @@ def append_return_level_summary(location: str, dataset: str, model: str, table: 
     out.to_csv(path, index=False)
     print(f"Updated summary table: {path}")
     return path
-
-
-def build_evt_summary_metrics(location: str):
-    path = summary_path(location)
-    if not path.exists():
-        return
-
-    df = pd.read_csv(path)
-    if "dataset" not in df.columns:
-        return
-
-    raw = df[df["dataset"] == "raw"]
-    if raw.empty:
-        return
-
-    rows = []
-    for dataset in sorted(df["dataset"].unique()):
-        if dataset == "raw":
-            continue
-
-        for model in ("GEV", "GPD"):
-            raw_ref = raw[raw["model"] == model]
-            model_ref = df[(df["dataset"] == dataset) & (df["model"] == model)]
-            if raw_ref.empty or model_ref.empty:
-                continue
-
-            for return_period in SUMMARY_RETURN_PERIODS:
-                raw_row = raw_ref[raw_ref["return_period"] == return_period]
-                model_row = model_ref[model_ref["return_period"] == return_period]
-                if raw_row.empty or model_row.empty:
-                    continue
-
-                rl_raw = float(raw_row["return_level"].iloc[0])
-                rl_model = float(model_row["return_level"].iloc[0])
-                ci_low = float(raw_row["ci_lower"].iloc[0])
-                ci_high = float(raw_row["ci_upper"].iloc[0])
-
-                rows.append(
-                    {
-                        "dataset": dataset,
-                        "model": model,
-                        "return_period": return_period,
-                        "rl_raw": rl_raw,
-                        "rl_model": rl_model,
-                        "rle_vs_raw": rl_model - rl_raw,
-                        "arle_vs_raw": abs(rl_model - rl_raw),
-                        "rrle_pct_vs_raw": 100 * (rl_model - rl_raw) / rl_raw if rl_raw else pd.NA,
-                        "inside_raw_ci": int(ci_low <= rl_model <= ci_high),
-                    }
-                )
-
-    if not rows:
-        return
-
-    out_path = path.parent / "summary_metrics.csv"
-    pd.DataFrame(rows).to_csv(out_path, index=False)
-    print(f"Saved EVT summary metrics: {out_path}")
