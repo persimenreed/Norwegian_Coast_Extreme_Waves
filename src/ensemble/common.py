@@ -239,12 +239,158 @@ def save_hindcast_output(location, df, prediction, output_name, member_families=
     return str(path)
 
 
+def _season_from_month(month):
+    if month in (12, 1, 2):
+        return "DJF"
+    if month in (3, 4, 5):
+        return "MAM"
+    if month in (6, 7, 8):
+        return "JJA"
+    if month in (9, 10, 11):
+        return "SON"
+    return np.nan
+
+
+def _wind_sector(direction):
+    if not np.isfinite(direction):
+        return np.nan
+
+    direction = float(direction) % 360.0
+    if direction >= 315.0 or direction < 45.0:
+        return "North"
+    if direction < 135.0:
+        return "East"
+    if direction < 225.0:
+        return "South"
+    return "West"
+
+
+def _hs_percentile_bin(values):
+    hs = pd.to_numeric(values, errors="coerce")
+    out = pd.Series(np.nan, index=hs.index, dtype=object)
+    finite = hs[hs.notna()]
+    if finite.empty:
+        return out
+
+    q50, q75, q95 = np.nanquantile(finite.to_numpy(dtype=float), [0.50, 0.75, 0.95])
+    out.loc[hs <= q50] = "0-50"
+    out.loc[(hs > q50) & (hs <= q75)] = "50-75"
+    out.loc[(hs > q75) & (hs <= q95)] = "75-95"
+    out.loc[hs > q95] = "95-100"
+    return out
+
+
+def _weight_summary_path(application_label):
+    out_dir = Path("results") / "ensemble" / "weight_summaries"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir / f"{application_label}_weight_summary.csv"
+
+
+def _expert_label(expert):
+    text = str(expert)
+    replacements = {
+        "transfer_fauskane_": "Fauskane ",
+        "transfer_fedjeosen_": "Fedjeosen ",
+        "linear": "Linear",
+        "pqm": "PQM",
+        "dagqm": "DAGQM",
+        "gpr": "GPR",
+        "xgboost": "XGBoost",
+        "transformer": "Transformer",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text.replace("_", " ").strip()
+
+
+def save_weight_summary(
+    location,
+    df,
+    weights,
+    output_name,
+    methods,
+    application_label,
+    member_families=None,
+):
+    weights = np.asarray(weights, dtype=float)
+    if weights.ndim != 2:
+        raise ValueError("weights must be a 2D array")
+    if len(df) != weights.shape[0]:
+        raise ValueError(
+            f"Length mismatch between data frame ({len(df)}) and weights ({weights.shape[0]})."
+        )
+    if len(methods) != weights.shape[1]:
+        raise ValueError(
+            f"Length mismatch between methods ({len(methods)}) and weights ({weights.shape[1]})."
+        )
+
+    meta = pd.DataFrame()
+    meta[TIME] = pd.to_datetime(df[TIME], errors="coerce")
+    meta["season"] = meta[TIME].dt.month.map(_season_from_month)
+
+    direction_column = next(
+        (column for column in ("wind_direction_10m", "wind_direction_20m", "Pdir", "thq") if column in df.columns),
+        None,
+    )
+    if direction_column is not None:
+        meta["wind_sector"] = pd.to_numeric(df[direction_column], errors="coerce").map(_wind_sector)
+    else:
+        meta["wind_sector"] = np.nan
+
+    hs_column = OBS if OBS in df.columns else MODEL if MODEL in df.columns else None
+    if hs_column is not None:
+        meta["hs_percentile"] = _hs_percentile_bin(df[hs_column])
+    else:
+        meta["hs_percentile"] = np.nan
+
+    grouping_specs = [
+        ("wind_sector", ["North", "East", "South", "West"]),
+        ("season", ["DJF", "MAM", "JJA", "SON"]),
+        ("hs_percentile", ["0-50", "50-75", "75-95", "95-100"]),
+    ]
+
+    rows = []
+    input_families = "|".join(member_families or [])
+    for grouping, labels in grouping_specs:
+        groups = meta[grouping].astype(object)
+        for label in labels:
+            mask = groups == label
+            n = int(mask.sum())
+            if n <= 0:
+                continue
+            group_weights = weights[mask.to_numpy(), :]
+            for idx, method in enumerate(methods):
+                values = group_weights[:, idx]
+                rows.append(
+                    {
+                        "application": application_label,
+                        "location": location,
+                        "output_name": output_name,
+                        "dataset_kind": "hindcast",
+                        "input_families": input_families,
+                        "grouping": grouping,
+                        "bin": label,
+                        "n": n,
+                        "expert": method,
+                        "expert_label": _expert_label(method),
+                        "mean_weight": float(np.nanmean(values)),
+                    }
+                )
+
+    out = pd.DataFrame(rows)
+    if member_families:
+        out["input_families"] = "|".join(member_families)
+
+    path = _weight_summary_path(application_label)
+    out.to_csv(path, index=False)
+    return str(path)
+
+
 def save_ensemble_report(
     output_name,
     training_labels,
     member_family,
     methods,
-    class_counts,
     top_features,
     contributions,
 ):
@@ -256,12 +402,7 @@ def save_ensemble_report(
         f"training_cases: {' | '.join(training_labels)}",
         f"application_member_family: {member_family}",
         f"members: {' | '.join(methods)}",
-        "",
-        "closest_expert_counts:",
     ]
-
-    for method in methods:
-        lines.append(f"  {method}: {int(class_counts.get(method, 0))}")
 
     lines.extend(["", "top_features:"])
     if isinstance(top_features, dict):

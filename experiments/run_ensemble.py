@@ -29,10 +29,6 @@ def _print_summary(res):
     print(f"Training cases: {', '.join(res['training_labels'])}")
     print(f"Apply member family: {res['application_member_family']}")
 
-    print("\nClosest-expert counts in training labels:")
-    for name, count in sorted(res["class_counts"].items()):
-        print(f"  {name}: {count}")
-
     if res["top_features"]:
         print("\nTop XGBoost features:")
         if isinstance(res["top_features"], dict):
@@ -47,6 +43,7 @@ def _print_summary(res):
     print(f"\nReport: {res['report_path']}")
     _print_paths("Validation outputs", res["validation_paths"])
     _print_paths("Hindcast outputs", res["hindcast_paths"])
+    _print_paths("Weight summaries", res.get("weight_summary_paths", {}))
 
 
 def _ensemble_jobs_for_location(location):

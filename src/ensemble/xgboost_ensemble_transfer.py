@@ -1,16 +1,25 @@
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
+from src.bias_correction.data import load_pairs
+from src.bias_correction.registry import get_method
+from src.bias_correction.validation import iter_local_cv_splits
 from src.ensemble.common import (
-    build_oof_predictions,
+    LOCATION,
+    MODEL,
+    OBS,
+    TIME,
     load_hindcast_dataset,
     load_training_validation_data,
     load_validation_dataset,
+    member_column,
     member_specs_exist,
     save_ensemble_report,
     save_hindcast_output,
     save_validation_output,
+    save_weight_summary,
     unique_locations,
 )
 from src.ensemble.xgboost_core import (
@@ -23,8 +32,6 @@ from src.settings import (
     get_methods,
     get_study_area_locations,
 )
-
-ENSEMBLE_OOF_FOLDS = 4
 
 
 def _selected_methods(methods=None):
@@ -60,6 +67,7 @@ def _available_transfer_families(location, methods, validation):
     for source in get_core_buoy_locations():
         if source == location:
             continue
+
         member_family = f"transfer_{source}"
         if member_specs_exist(
             location,
@@ -67,6 +75,7 @@ def _available_transfer_families(location, methods, validation):
             validation=validation,
         ):
             families.append(member_family)
+
     return families
 
 
@@ -162,6 +171,7 @@ def _target_member_specs(location, methods, source=None, combined=False, validat
     member_family = "localcv" if validation else "local"
     if source != location:
         member_family = f"transfer_{source}"
+
     specs = _member_specs(member_family, methods)
     return specs if member_specs_exist(location, specs, validation=validation) else []
 
@@ -175,7 +185,13 @@ def _default_target_locations(methods, source=None, combined=False):
     return unique_locations(
         location
         for location in locations
-        if _target_member_specs(location, methods, source=source, combined=combined, validation=False)
+        if _target_member_specs(
+            location,
+            methods,
+            source=source,
+            combined=combined,
+            validation=False,
+        )
     )
 
 
@@ -187,6 +203,24 @@ def _application_family(location, source, combined):
 
 def _mean_weight_map(weights, members):
     return {member: float(weights[:, idx].mean()) for idx, member in enumerate(members)}
+
+
+def _weight_summary_application(target_location, source, combined):
+    core = set(get_core_buoy_locations())
+    external = set(get_external_validation_buoys())
+    study_areas = set(get_study_area_locations())
+
+    if combined:
+        if target_location in external or target_location in study_areas:
+            return f"transfer_{target_location}"
+        return None
+
+    if target_location in core:
+        if source == target_location:
+            return f"local_{target_location}"
+        return f"transfer_{target_location}"
+
+    return None
 
 
 def _save_feature_importance(location, output_name, bundle):
@@ -201,6 +235,135 @@ def _save_feature_importance(location, output_name, bundle):
     return str(path)
 
 
+def _member_columns(methods):
+    return [member_column(method) for method in methods]
+
+
+def _method_profile_name(method_name, source):
+    return f"{method_name}_{source}"
+
+
+def _fit_member(method_name, df_train, source):
+    method = get_method(method_name)
+    model = method.fit(
+        df_train.copy(),
+        settings_name=_method_profile_name(method_name, source),
+    )
+    return method, model
+
+
+def _inner_oof_member_stack(df_train, methods, source):
+    df_train = df_train.copy().reset_index(drop=True)
+    member_cols = _member_columns(methods)
+
+    stack = df_train.copy()
+    for column in member_cols:
+        stack[column] = np.nan
+    stack[LOCATION] = source
+
+    for split in iter_local_cv_splits(df_train):
+        inner_train = df_train.iloc[split["train_idx"]].copy().reset_index(drop=True)
+        inner_test = df_train.iloc[split["test_idx"]].copy().reset_index(drop=True)
+
+        for method_name in methods:
+            method, model = _fit_member(method_name, inner_train, source)
+            pred = method.apply(inner_test.copy(), model)
+            stack.loc[split["test_idx"], member_column(method_name)] = pd.to_numeric(
+                pred[MODEL],
+                errors="coerce",
+            ).to_numpy(dtype=float)
+
+    stack = stack.dropna(subset=[OBS] + member_cols).reset_index(drop=True)
+
+    if len(stack) < 50:
+        raise ValueError(
+            f"Too few valid nested local MoE training rows for '{source}': {len(stack)}."
+        )
+
+    return stack
+
+
+def _outer_test_member_stack(df_train, df_test, methods, source):
+    df_train = df_train.copy().reset_index(drop=True)
+    df_test = df_test.copy().reset_index(drop=True)
+
+    stack = df_test.copy()
+
+    for method_name in methods:
+        method, model = _fit_member(method_name, df_train, source)
+        pred = method.apply(df_test.copy(), model)
+        stack[member_column(method_name)] = pd.to_numeric(
+            pred[MODEL],
+            errors="coerce",
+        ).to_numpy(dtype=float)
+
+    stack[LOCATION] = source
+    stack = stack.dropna(subset=[OBS] + _member_columns(methods)).reset_index(drop=True)
+
+    if stack.empty:
+        raise ValueError(f"No valid nested local MoE test rows for '{source}'.")
+
+    return stack
+
+
+def _run_nested_local_moe_validation(location, methods, profile_name, output_name):
+    df_pairs = load_pairs(location).reset_index(drop=True)
+
+    frames = []
+
+    for outer_split in iter_local_cv_splits(df_pairs):
+        outer_train = df_pairs.iloc[outer_split["train_idx"]].copy().reset_index(drop=True)
+        outer_test = df_pairs.iloc[outer_split["test_idx"]].copy().reset_index(drop=True)
+
+        train_stack = _inner_oof_member_stack(
+            outer_train,
+            methods,
+            source=location,
+        )
+        test_stack = _outer_test_member_stack(
+            outer_train,
+            outer_test,
+            methods,
+            source=location,
+        )
+
+        bundle = fit_state_corrected_ensemble(
+            train_stack,
+            methods,
+            profile_name=profile_name,
+        )
+        pred = predict_state_corrected_ensemble(test_stack, bundle)
+
+        test_stack = test_stack.copy()
+        test_stack["_nested_moe_prediction"] = pred
+        test_stack["nested_outer_fold"] = outer_split["fold"]
+        test_stack["nested_outer_test_groups"] = "|".join(outer_split["test_groups"])
+
+        frames.append(test_stack)
+
+    if not frames:
+        raise ValueError(f"No nested local MoE folds were generated for '{location}'.")
+
+    df_val = pd.concat(frames, ignore_index=True)
+
+    if TIME in df_val.columns:
+        df_val = df_val.sort_values(TIME).reset_index(drop=True)
+
+    prediction = df_val.pop("_nested_moe_prediction").to_numpy(dtype=float)
+
+    return save_validation_output(
+        location=location,
+        df=df_val,
+        prediction=prediction,
+        output_name=output_name,
+        train_locations=[location],
+        member_family="local_nested_cv",
+        member_families=["local_nested_cv"],
+        methods=methods,
+        validation_type="ensemble_nested_local_cv",
+    )
+
+
 def run(location=None, methods=None, source=None, combined=False, output_name=None):
     setup = build_training_setup(source=None if combined else source, methods=methods)
     methods = setup["methods"]
@@ -212,7 +375,9 @@ def run(location=None, methods=None, source=None, combined=False, output_name=No
     output_name = output_name or setup["default_output_name"]
 
     target_locations = unique_locations(
-        [location] if location else _default_target_locations(methods, source=source, combined=combined)
+        [location]
+        if location
+        else _default_target_locations(methods, source=source, combined=combined)
     )
     training_labels = [spec["label"] for spec in training_specs]
 
@@ -222,21 +387,17 @@ def run(location=None, methods=None, source=None, combined=False, output_name=No
         training_members,
         profile_name=profile_name,
     )
-    oof_pred = build_oof_predictions(
-        train_df,
-        fit_fn=lambda df_fold: fit_state_corrected_ensemble(
-            df_fold,
-            training_members,
-            profile_name=profile_name,
-        ),
-        predict_fn=predict_state_corrected_ensemble,
-        n_splits=ENSEMBLE_OOF_FOLDS,
-    )
 
     saved_validation = {}
     saved_hindcast = {}
+    saved_weight_summaries = {}
     contributions = {}
-    training_targets = set(train_df["apply_target"].dropna().astype(str).tolist()) if "apply_target" in train_df.columns else set()
+
+    training_targets = (
+        set(train_df["apply_target"].dropna().astype(str).tolist())
+        if "apply_target" in train_df.columns
+        else set()
+    )
 
     for target_location in target_locations:
         hindcast_specs = _target_member_specs(
@@ -263,19 +424,20 @@ def run(location=None, methods=None, source=None, combined=False, output_name=No
         )
 
         if target_location in training_targets:
-            mask = train_df["apply_target"].astype(str) == target_location
-            df_val = train_df.loc[mask].copy().reset_index(drop=True)
-            saved_validation[target_location] = save_validation_output(
-                location=target_location,
-                df=df_val,
-                prediction=np.asarray(oof_pred[mask.to_numpy()], dtype=float),
-                output_name=output_name,
-                train_locations=training_labels,
-                member_family=family_label,
-                member_families=input_families,
-                methods=training_members,
-                validation_type="ensemble_oof",
-            )
+            if not combined and source == target_location:
+                saved_validation[target_location] = _run_nested_local_moe_validation(
+                    location=target_location,
+                    methods=methods,
+                    profile_name=profile_name,
+                    output_name=output_name,
+                )
+            else:
+                print(
+                    f"Skipping ensemble validation for {target_location}: "
+                    "target location is part of the ensemble training data and no nested "
+                    "validation path is defined for this configuration."
+                )
+
         elif validation_specs:
             df_val = load_validation_dataset(
                 location=target_location,
@@ -300,6 +462,7 @@ def run(location=None, methods=None, source=None, combined=False, output_name=No
 
         df_hind = load_hindcast_dataset(target_location, hindcast_specs)
         pred, weights = predict_state_corrected_ensemble(df_hind, bundle, return_weights=True)
+
         saved_hindcast[target_location] = save_hindcast_output(
             location=target_location,
             df=df_hind,
@@ -307,6 +470,19 @@ def run(location=None, methods=None, source=None, combined=False, output_name=No
             output_name=output_name,
             member_families=input_families,
         )
+
+        application_label = _weight_summary_application(target_location, source, combined)
+        if application_label is not None:
+            saved_weight_summaries[target_location] = save_weight_summary(
+                location=target_location,
+                df=df_hind,
+                weights=weights,
+                output_name=output_name,
+                methods=training_members,
+                application_label=application_label,
+                member_families=input_families,
+            )
+
         contributions[target_location]["hindcast_mean_weights"] = _mean_weight_map(
             weights,
             training_members,
@@ -317,7 +493,6 @@ def run(location=None, methods=None, source=None, combined=False, output_name=No
         training_labels=training_labels,
         member_family=_application_family(location, source, combined),
         methods=training_members,
-        class_counts=bundle["class_counts"],
         top_features=bundle["top_features"],
         contributions=contributions,
     )
@@ -332,9 +507,9 @@ def run(location=None, methods=None, source=None, combined=False, output_name=No
             for spec in training_spec["member_specs"]
         ),
         "application_member_family": _application_family(location, source, combined),
-        "class_counts": bundle["class_counts"],
         "top_features": bundle["top_features"],
         "validation_paths": saved_validation,
         "hindcast_paths": saved_hindcast,
+        "weight_summary_paths": saved_weight_summaries,
         "report_path": report_path,
     }

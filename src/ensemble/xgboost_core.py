@@ -335,8 +335,6 @@ def fit_state_corrected_ensemble(
         state_features=state_feature_names,
     )
 
-    counts = np.bincount(dominant, minlength=len(methods))
-
     bundle = {
         "methods": list(methods),
         "state_feature_names": state_feature_names,
@@ -344,11 +342,6 @@ def fit_state_corrected_ensemble(
         "gate_feature_names": gate_feature_names,
         "tail_aware": _tail_aware_config(df, profile_name=profile_name),
         "mean_target_weights": soft_targets.mean(axis=0).tolist(),
-        "class_counts": {
-            methods[idx]: int(counts[idx])
-            for idx in range(len(methods))
-            if counts[idx] > 0
-        },
         "top_features": {"gate": [], "residual": []},
         "gate_models": {},
         "constant_scores": {},
