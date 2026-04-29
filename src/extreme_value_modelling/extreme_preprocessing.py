@@ -81,6 +81,8 @@ def _update_wide_csv(path, index_name, series, column_name):
             existing[index_name] = pd.to_datetime(existing[index_name], errors="coerce")
             existing = existing.dropna(subset=[index_name])
         existing = existing.set_index(index_name)
+        existing = existing.reindex(existing.index.union(series.index))
+        existing.index.name = index_name
         existing[column_name] = series
         existing[sorted(existing.columns)].reset_index().to_csv(path, index=False)
         return
