@@ -2,7 +2,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-SETTINGS_PATH = Path("config/settings.yaml")
+SETTINGS_PATH = Path(__file__).with_name("settings.yaml")
 DEFAULT_METHODS = ["linear", "pqm", "dagqm", "gpr", "xgboost", "transformer"]
 
 

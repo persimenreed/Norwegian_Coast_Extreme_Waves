@@ -63,4 +63,6 @@ BIAS_CORRECTION/output
 TESTING*
 TMP*
 SPATIAL_VISUALIZATION
+src/MISC/
+src/extreme_value_analysis/
 results*
