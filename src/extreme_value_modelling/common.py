@@ -14,6 +14,7 @@ THRESHOLD_QUANTILE = 0.95
 DECLUSTER_HOURS = 48.0
 RETURN_PERIOD_GRID = np.arange(1, 51, dtype=float)
 BOOTSTRAP_SAMPLES = 1000
+BOOTSTRAP_SEED = 1
 CONF_LEVEL = 0.95
 
 
@@ -37,6 +38,7 @@ def summary_path(location: str) -> Path:
 
 
 def bootstrap_confidence_interval(n_bootstrap, make_levels, desc, conf_level=CONF_LEVEL):
+    np.random.seed(BOOTSTRAP_SEED)
     boot_levels = []
     for _ in tqdm(range(int(n_bootstrap)), desc=desc):
         try:
