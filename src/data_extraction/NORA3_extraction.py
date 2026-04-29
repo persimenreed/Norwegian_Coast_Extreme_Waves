@@ -48,7 +48,7 @@ WAV_VARS = [
 ]
 
 # ==========================================
-# YEAR LOOP (LIKE WAM800)
+# YEAR LOOP
 # ==========================================
 
 start_year = pd.to_datetime(START_DATE).year
