@@ -4,8 +4,13 @@ from scipy.stats import genpareto
 
 from src.extreme_value_modelling.common import DECLUSTER_HOURS, THRESHOLD_QUANTILE
 from src.extreme_value_modelling.common import dataset_name
-from src.extreme_value_modelling.extreme_preprocessing import compute_pot, load_data
+from src.extreme_value_modelling.extreme_preprocessing import compute_pot, decluster_clustermax, load_data
 from src.extreme_value_modelling.paths import resolve_diagnostics_dir, resolve_input_path
+
+
+def _threshold_grid(values: np.ndarray, chosen_threshold: float) -> np.ndarray:
+    thresholds = np.linspace(np.percentile(values, 90), np.percentile(values, 99), 30)
+    return np.unique(np.sort(np.append(thresholds, chosen_threshold)))
 
 
 def run(location, mode, corr_method="pqm", transfer_source=None):
@@ -18,15 +23,16 @@ def run(location, mode, corr_method="pqm", transfer_source=None):
     hs = df["hs"].values
     _, chosen_threshold, _, _ = compute_pot(df, quantile=THRESHOLD_QUANTILE, decluster_hours=DECLUSTER_HOURS)
 
-    thresholds = np.linspace(np.percentile(hs, 90), np.percentile(hs, 99), 30)
+    thresholds = _threshold_grid(hs, chosen_threshold)
 
-    stats = {"mean_excess": [], "xi": [], "sigma": [], "n_exceed": []}
+    stats = {"mean_excess": [], "xi": [], "sigma": [], "n_peaks": []}
 
     for u in thresholds:
-        exceed = hs[hs > u]
-        excess = exceed - u
+        peaks = decluster_clustermax(df[df["hs"] > u], DECLUSTER_HOURS)
+        excess = peaks.to_numpy(dtype=float) - u
+        excess = excess[excess > 0]
 
-        stats["n_exceed"].append(len(exceed))
+        stats["n_peaks"].append(len(excess))
 
         if len(excess) > 30:
             stats["mean_excess"].append(np.mean(excess))
