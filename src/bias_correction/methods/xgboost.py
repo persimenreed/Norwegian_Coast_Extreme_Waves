@@ -38,7 +38,7 @@ DEFAULT_XGBOOST_CONFIG = {
     "tail_residual_protection_mode": "sign_aware",
     "tail_residual_start": 0.95,
     "tail_residual_end": 0.999,
-    "tail_residual_min_scale": 0.20,
+    "tail_residual_min_scale": 0.25,
     "n_estimators": 600,
     "max_depth": 4,
     "learning_rate": 0.05,
