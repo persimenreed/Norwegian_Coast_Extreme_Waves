@@ -214,17 +214,17 @@ def _apply_tail_aware_weighting(df, bundle, weights, members):
         return weights
 
     finite_members = np.isfinite(members)
-    safe_min = np.where(finite_members, members, np.inf)
-    safe_max = np.where(finite_members, members, -np.inf)
-    member_min = safe_min.min(axis=1, keepdims=True)
-    member_max = safe_max.max(axis=1, keepdims=True)
-    member_min[~np.isfinite(member_min)] = 0.0
-    member_max[~np.isfinite(member_max)] = 0.0
-    spread = np.maximum(member_max - member_min, 1e-6)
-    relative_level = np.clip((members - member_min) / spread, 0.0, 1.0)
+    adjusted = np.where(finite_members, weights, 0.0).astype(float)
 
-    factors = 1.0 + strength[:, None] * relative_level
-    adjusted = np.where(finite_members, weights * factors, 0.0)
+    tail_rows = strength > 0
+    power = 1.0 + strength[tail_rows, None]
+
+    adjusted[tail_rows] = np.where(
+        finite_members[tail_rows],
+        np.power(np.maximum(adjusted[tail_rows], 1e-12), power),
+        0.0,
+    )
+
     return adjusted
 
 
