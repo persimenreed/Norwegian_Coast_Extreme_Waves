@@ -44,18 +44,7 @@ __pycache__/
 data/*
 raw_data/*
 
-DATA_EXTRACTION/nora3_locations
-DATA_EXTRACTION/nora3_partitioned
-DATA_EXTRACTION/wam800_locations
-DATA_EXTRACTION/wam800_partitioned
-
 # misc
-NORA3_extraction
-depth
-cache
-Forecast
-BIAS_CORRECTION/dataset
-BIAS_CORRECTION/output
 *.nc
 *.parquet
 *.csv
@@ -63,6 +52,9 @@ BIAS_CORRECTION/output
 TESTING*
 TMP*
 SPATIAL_VISUALIZATION
-src/MISC/
+src/optuna_parameter_search/db
 src/extreme_value_analysis/
 results*
+src/plotting/
+HOW_TO_RUN.txt
+setup.sh
