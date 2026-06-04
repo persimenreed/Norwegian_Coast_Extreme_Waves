@@ -35,6 +35,19 @@ METHOD_COLORS = {
     "XGBoost": "#6b6ecf",
     "1:1": "#111111",
 }
+
+EVAL_AXIS_LABEL_FONTSIZE = 15
+EVAL_TICK_LABEL_FONTSIZE = 15
+EVAL_TITLE_FONTSIZE = 17
+EVAL_LEGEND_FONTSIZE = 13
+
+
+def _apply_eval_text_style(title: str | None = None):
+    ax = plt.gca()
+    ax.tick_params(axis="both", labelsize=EVAL_TICK_LABEL_FONTSIZE)
+    if title is not None:
+        plt.title(title, fontsize=EVAL_TITLE_FONTSIZE)
+
 METHOD_LABELS = {
     "raw": "NORA3",
     "buoy": "Observed",
@@ -320,11 +333,11 @@ def _plot_pdf_single(obs, series_dict, out_path, title_suffix):
         style = _pdf_cdf_style(name)
         plt.plot(c, h, label=_display_name(name), **style)
 
-    plt.xlabel("Hs (m)")
-    plt.ylabel("Density")
-    plt.title(f"PDF comparison ({_display_group_name(title_suffix)})")
+    plt.xlabel(r"$H_s$ (m)", fontsize=EVAL_AXIS_LABEL_FONTSIZE)
+    plt.ylabel("Density", fontsize=EVAL_AXIS_LABEL_FONTSIZE)
+    _apply_eval_text_style(f"PDF comparison ({_display_group_name(title_suffix)})")
     plt.grid(alpha=0.2)
-    plt.legend(fontsize=7, ncol=2)
+    plt.legend(fontsize=EVAL_LEGEND_FONTSIZE, ncol=2)
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
@@ -358,8 +371,9 @@ def _plot_cdf_single(obs, series_dict, out_path, title_suffix):
         style = _pdf_cdf_style(name, linewidth=1.95)
         plt.plot(x, p, label=_display_name(name), **style)
 
-    plt.xlabel("Hs (m)")
-    plt.ylabel("Empirical CDF")
+    plt.xlabel(r"$H_s$ (m)", fontsize=EVAL_AXIS_LABEL_FONTSIZE)
+    plt.ylabel("Empirical CDF", fontsize=EVAL_AXIS_LABEL_FONTSIZE)
+    _apply_eval_text_style()
     q_low = [
         float(np.nanquantile(values, CDF_XMIN_QUANTILE))
         for values in plotted_values
@@ -377,7 +391,7 @@ def _plot_cdf_single(obs, series_dict, out_path, title_suffix):
             plt.xlim(x_min, x_max)
     plt.ylim(CDF_YMIN, 1.002)
     plt.grid(alpha=0.2)
-    plt.legend(fontsize=7, ncol=2)
+    plt.legend(fontsize=EVAL_LEGEND_FONTSIZE, ncol=2)
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
@@ -423,10 +437,11 @@ def _plot_qq_single(obs, series_dict, out_path, title_suffix):
     hi = float(np.nanmax(obs_q))
     plt.plot([lo, hi], [lo, hi], color=_color_for_name("1:1"), linestyle="-", linewidth=1.1, label="1:1")
 
-    plt.xlabel("Observed quantiles")
-    plt.ylabel("Model quantiles")
+    plt.xlabel("Observed quantiles", fontsize=EVAL_AXIS_LABEL_FONTSIZE)
+    plt.ylabel("Model quantiles", fontsize=EVAL_AXIS_LABEL_FONTSIZE)
+    _apply_eval_text_style()
     plt.grid(alpha=0.2)
-    plt.legend(fontsize=7, ncol=2)
+    plt.legend(fontsize=EVAL_LEGEND_FONTSIZE, ncol=2)
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
@@ -450,11 +465,11 @@ def _plot_residuals_single(obs, series_dict, out_path, title_suffix):
 
     plt.axhline(0, color="k", linestyle="-", linewidth=1)
 
-    plt.xlabel("Observed Hs (m)")
-    plt.ylabel("Residual (model − observed)")
-    plt.title(f"Residuals ({_display_group_name(title_suffix)})")
+    plt.xlabel(r"Observed $H_s$ (m)", fontsize=EVAL_AXIS_LABEL_FONTSIZE)
+    plt.ylabel("Residual (model - observed)", fontsize=EVAL_AXIS_LABEL_FONTSIZE)
+    _apply_eval_text_style(f"Residuals ({_display_group_name(title_suffix)})")
     plt.grid(alpha=0.2)
-    plt.legend(fontsize=7, ncol=2)
+    plt.legend(fontsize=EVAL_LEGEND_FONTSIZE, ncol=2)
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
